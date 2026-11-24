@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+prefix=@PREFIX@
+built_mutter=@MUTTER_VERSION@
+built_shell=@SHELL_VERSION@
+
+system_mutter=$(/usr/bin/mutter --version | awk 'NR == 1 { print $2 }')
+system_shell=$(/usr/bin/gnome-shell --version | awk '{ print $3 }')
+if [[ $system_mutter != "$built_mutter" || $system_shell != "$built_shell" ]]; then
+  echo "mutter-independent-workspaces: built for mutter $built_mutter and gnome-shell $built_shell," \
+    "the system has $system_mutter and $system_shell; rebuild it" >&2
+  exit 2
+fi
+
+export GSETTINGS_SCHEMA_DIR=$prefix/share/mutter-independent-workspaces/schemas
+exec "$prefix/bin/gnome-shell" "$@"

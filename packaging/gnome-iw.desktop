@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=GNOME (Independent Workspaces)
+Comment=GNOME with independent workspaces per monitor
+Exec=/usr/bin/gnome-session --session gnome-iw
+TryExec=/usr/bin/gnome-session
+Type=Application
+DesktopNames=GNOME
+X-GDM-SessionRegisters=true
