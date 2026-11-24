@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 10:30:00 +0300
+Subject: [PATCH] fix(workspace): keep the global active workspace on the
+ monitor in use
+
+New windows and launch contexts start on the global active workspace, which per-monitor activation never updated. A window opening on the monitor that owned the stale workspace stayed on it instead of the workspace shown there.
+---
+ src/core/workspace.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/core/workspace.c b/src/core/workspace.c
+index 11e2763..60b722e 100644
+--- a/src/core/workspace.c
++++ b/src/core/workspace.c
+@@ -650,6 +650,9 @@ meta_workspace_activate_with_focus (MetaWorkspace *workspace,
+       /* Update monitor workspace container */
+       container->active_workspace = workspace;
+ 
++      workspace->manager->active_workspace = workspace;
++      g_signal_emit_by_name (workspace->manager, "active-workspace-changed");
++
+       g_object_notify_by_pspec (G_OBJECT (workspace), obj_props[PROP_ACTIVE]);
+       if (old_workspace)
+         g_object_notify_by_pspec (G_OBJECT (old_workspace), obj_props[PROP_ACTIVE]);
