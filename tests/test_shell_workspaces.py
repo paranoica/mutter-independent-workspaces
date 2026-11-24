@@ -1,4 +1,6 @@
 import os
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -8,6 +10,11 @@ ROOT = Path(__file__).resolve().parent.parent
 PREFIX = Path(os.environ.get("MIW_PREFIX", "/opt/mutter-independent-workspaces/usr"))
 SHELL = PREFIX / "bin" / "gnome-shell"
 SCRIPT = ROOT / "tests" / "shell" / "per-monitor-workspaces.js"
+DOCK_SCRIPT = ROOT / "tests" / "shell" / "dash-to-dock.js"
+DOCK_UUID = "dash-to-dock@micxgx.gmail.com"
+DOCK_SOURCE = (
+    Path.home() / ".local" / "share" / "gnome-shell" / "extensions" / DOCK_UUID
+)
 
 pytestmark = pytest.mark.skipif(not SHELL.exists(), reason="no build in the prefix")
 
@@ -79,3 +86,29 @@ def assert_clean(result: subprocess.CompletedProcess[str]) -> None:
 def test_per_monitor_workspaces(tmp_path: Path, dynamic: bool) -> None:
     assert_clean(run_shell(tmp_path, dynamic))
 
+
+@pytest.mark.skipif(not DOCK_SOURCE.is_dir(), reason="dash-to-dock is not installed")
+def test_dash_to_dock(tmp_path: Path) -> None:
+    extensions = tmp_path / "data" / "gnome-shell" / "extensions"
+    shutil.copytree(DOCK_SOURCE, extensions / DOCK_UUID)
+    patched = subprocess.run(
+        [ROOT / "scripts" / "patch-extensions.sh"],
+        env={**os.environ, "XDG_DATA_HOME": str(tmp_path / "data")},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert re.search(
+        rf"{re.escape(DOCK_UUID)}: (patched|already patched)", patched.stdout
+    ), (patched.stdout + patched.stderr)
+    result = run_shell(
+        tmp_path,
+        dynamic=True,
+        script=DOCK_SCRIPT,
+        extra_keyfile=(
+            f"[org/gnome/shell]\nenabled-extensions=['{DOCK_UUID}']\n\n"
+            "[org/gnome/shell/extensions/dash-to-dock]\n"
+            "intellihide=true\ndock-fixed=false\nintellihide-mode='ALL_WINDOWS'\n"
+        ),
+    )
+    assert_clean(result)
