@@ -1,0 +1,335 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 10:30:00 +0300
+Subject: [PATCH] test(stacking): cover new windows and focus with per-monitor
+ workspaces
+
+Adds a --per-monitor-workspaces option to the test runner and commands to switch and check the workspaces of a given monitor. Switching waits for the animation to end, since the test shell crashes when a switch starts while another runs on a second monitor.
+---
+ src/compositor/compositor-private.h           |   1 +
+ src/tests/meson.build                         |  18 +++
+ .../per-monitor-workspaces-focus.metatest     |  56 ++++++++
+ ...per-monitor-workspaces-new-window.metatest |  44 ++++++
+ src/tests/test-runner.c                       | 126 ++++++++++++++++++
+ 5 files changed, 245 insertions(+)
+ create mode 100644 src/tests/stacking/per-monitor-workspaces-focus.metatest
+ create mode 100644 src/tests/stacking/per-monitor-workspaces-new-window.metatest
+
+diff --git a/src/compositor/compositor-private.h b/src/compositor/compositor-private.h
+index 4481017..33dd8a5 100644
+--- a/src/compositor/compositor-private.h
++++ b/src/compositor/compositor-private.h
+@@ -94,6 +94,7 @@ gboolean meta_compositor_is_unredirect_inhibited (MetaCompositor *compositor);
+ MetaDisplay * meta_compositor_get_display (MetaCompositor *compositor);
+ 
+ MetaWindowActor * meta_compositor_get_top_window_actor (MetaCompositor *compositor);
++META_EXPORT_TEST
+ gboolean meta_compositor_is_switching_workspace (MetaCompositor *compositor);
+ 
+ gboolean meta_compositor_drag_window (MetaCompositor      *compositor,
+diff --git a/src/tests/meson.build b/src/tests/meson.build
+index a58ddac..279b9c7 100644
+--- a/src/tests/meson.build
++++ b/src/tests/meson.build
+@@ -1429,6 +1429,24 @@ foreach stacking_test: stacking_tests
+   )
+ endforeach
+ 
++per_monitor_stacking_tests = [
++  'per-monitor-workspaces-focus',
++  'per-monitor-workspaces-new-window',
++]
++
++foreach stacking_test: per_monitor_stacking_tests
++  test(stacking_test, test_runner,
++    suite: ['core', 'mutter/stacking'],
++    env: test_env,
++    args: [
++      '--per-monitor-workspaces',
++      files('stacking' / stacking_test + '.metatest'),
++    ],
++    is_parallel: false,
++    timeout: default_test_timeout,
++  )
++endforeach
++
+ if have_kvm_tests or have_tty_tests
+   privileged_tests = []
+   foreach test_case: privileged_test_cases
+diff --git a/src/tests/stacking/per-monitor-workspaces-focus.metatest b/src/tests/stacking/per-monitor-workspaces-focus.metatest
+new file mode 100644
+index 0000000..47aa162
+--- /dev/null
++++ b/src/tests/stacking/per-monitor-workspaces-focus.metatest
+@@ -0,0 +1,56 @@
++resize_monitor default 800 600
++add_monitor secondary 800 600
++set_monitor_order default secondary
++assert_primary_monitor default
++set_pref center-new-windows false
++
++new_client w wayland
++
++move_cursor_to 1200 300
++create w/1 csd
++resize w/1 300 200
++show w/1
++create w/2 csd
++resize w/2 300 200
++show w/2
++wait
++assert_window_monitor_workspace w/1 secondary 0
++assert_window_monitor_workspace w/2 secondary 0
++assert_focused w/2
++
++move_cursor_to 400 300
++activate_monitor_workspace default 1
++activate_monitor_workspace default 0
++move_cursor_to 1200 300
++local_activate w/1
++wait
++assert_focused w/1
++
++activate_monitor_workspace secondary 1
++activate_monitor_workspace secondary 0
++wait
++assert_focused w/1
++
++move_cursor_to 400 300
++create w/3 csd
++resize w/3 300 200
++show w/3
++create w/4 csd
++resize w/4 300 200
++show w/4
++wait
++assert_window_monitor_workspace w/3 default 0
++assert_focused w/4
++
++move_cursor_to 1200 300
++activate_monitor_workspace secondary 1
++activate_monitor_workspace secondary 0
++move_cursor_to 400 300
++local_activate w/3
++wait
++assert_focused w/3
++
++activate_monitor_workspace default 1
++activate_monitor_workspace default 0
++wait
++assert_focused w/3
+diff --git a/src/tests/stacking/per-monitor-workspaces-new-window.metatest b/src/tests/stacking/per-monitor-workspaces-new-window.metatest
+new file mode 100644
+index 0000000..75cd267
+--- /dev/null
++++ b/src/tests/stacking/per-monitor-workspaces-new-window.metatest
+@@ -0,0 +1,44 @@
++resize_monitor default 800 600
++add_monitor secondary 800 600
++set_monitor_order default secondary
++assert_primary_monitor default
++set_pref center-new-windows false
++
++new_client w wayland
++new_client x x11
++
++move_cursor_to 1200 300
++activate_monitor_workspace secondary 2
++
++create w/1 csd
++resize w/1 300 200
++show w/1 async
++create x/1
++resize x/1 300 200
++show x/1 async
++wait
++assert_window_main_monitor w/1 secondary
++assert_window_monitor_workspace w/1 secondary 2
++assert_window_main_monitor x/1 secondary
++assert_window_monitor_workspace x/1 secondary 2
++
++move_cursor_to 400 300
++activate_monitor_workspace default 1
++
++create w/2 csd
++resize w/2 300 200
++show w/2 async
++create x/2
++resize x/2 300 200
++show x/2 async
++wait
++assert_window_main_monitor w/2 default
++assert_window_monitor_workspace w/2 default 1
++assert_window_main_monitor x/2 default
++assert_window_monitor_workspace x/2 default 1
++
++assert_window_monitor_workspace w/1 secondary 2
++assert_window_monitor_workspace x/1 secondary 2
++
++assert_monitor_workspace_active secondary 2
++assert_monitor_workspace_active default 1
+diff --git a/src/tests/test-runner.c b/src/tests/test-runner.c
+index 5e28fea..73f00be 100644
+--- a/src/tests/test-runner.c
++++ b/src/tests/test-runner.c
+@@ -1296,6 +1296,37 @@ parse_barrier_flags (const char        *flags_string,
+   return TRUE;
+ }
+ 
++static MetaWorkspace *
++get_monitor_workspace (TestCase    *test,
++                       const char  *monitor_id,
++                       const char  *index_str,
++                       GError     **error)
++{
++  MetaDisplay *display = meta_context_get_display (test->context);
++  MetaWorkspaceManager *workspace_manager =
++    meta_display_get_workspace_manager (display);
++  MetaLogicalMonitor *logical_monitor;
++  GList *workspaces;
++  MetaWorkspace *workspace;
++
++  logical_monitor = get_logical_monitor (test, monitor_id, error);
++  if (!logical_monitor)
++    return NULL;
++
++  workspaces = meta_workspace_manager_get_workspaces_for_monitor (
++    workspace_manager, meta_logical_monitor_get_number (logical_monitor));
++  workspace = g_list_nth_data (workspaces, atoi (index_str));
++  if (!workspace)
++    {
++      g_set_error (error, META_TEST_CLIENT_ERROR,
++                   META_TEST_CLIENT_ERROR_BAD_COMMAND,
++                   "Monitor %s has no workspace %s", monitor_id, index_str);
++      return NULL;
++    }
++
++  return workspace;
++}
++
+ static gboolean
+ test_case_do (TestCase    *test,
+               const char  *filename,
+@@ -2855,6 +2886,86 @@ test_case_do (TestCase    *test,
+       uint32_t timestamp = meta_display_get_current_time_roundtrip (display);
+       meta_workspace_activate (workspace, timestamp);
+     }
++  else if (strcmp (argv[0], "activate_monitor_workspace") == 0)
++    {
++      MetaDisplay *display = meta_context_get_display (test->context);
++      MetaWorkspace *workspace;
++
++      if (argc != 3)
++        BAD_COMMAND ("usage: %s <monitor-id> <workspace-index>", argv[0]);
++
++      workspace = get_monitor_workspace (test, argv[1], argv[2], error);
++      if (!workspace)
++        return FALSE;
++
++      meta_workspace_activate (workspace,
++                               meta_display_get_current_time_roundtrip (display));
++
++      while (meta_compositor_is_switching_workspace (
++               meta_display_get_compositor (display)))
++        g_main_context_iteration (NULL, TRUE);
++    }
++  else if (strcmp (argv[0], "assert_monitor_workspace_active") == 0)
++    {
++      MetaWorkspace *workspace;
++      gboolean active;
++
++      if (argc != 3)
++        BAD_COMMAND ("usage: %s <monitor-id> <workspace-index>", argv[0]);
++
++      workspace = get_monitor_workspace (test, argv[1], argv[2], error);
++      if (!workspace)
++        return FALSE;
++
++      g_object_get (workspace, "active", &active, NULL);
++      if (!active)
++        {
++          g_set_error (error,
++                       META_TEST_CLIENT_ERROR,
++                       META_TEST_CLIENT_ERROR_ASSERTION_FAILED,
++                       "Workspace %s of monitor %s is not active",
++                       argv[2], argv[1]);
++          return FALSE;
++        }
++    }
++  else if (strcmp (argv[0], "assert_window_monitor_workspace") == 0)
++    {
++      MetaTestClient *client;
++      const char *window_id;
++      MetaWindow *window;
++      MetaWorkspace *workspace;
++
++      if (argc != 4)
++        BAD_COMMAND ("usage: %s <window-id> <monitor-id> <workspace-index>",
++                     argv[0]);
++
++      if (!test_case_parse_window_id (test, argv[1], &client, &window_id, error))
++        return FALSE;
++
++      window = meta_test_client_find_window (client, window_id, error);
++      if (!window)
++        return FALSE;
++
++      workspace = get_monitor_workspace (test, argv[2], argv[3], error);
++      if (!workspace)
++        return FALSE;
++
++      if (window->workspace != workspace)
++        {
++          g_set_error (error,
++                       META_TEST_CLIENT_ERROR,
++                       META_TEST_CLIENT_ERROR_ASSERTION_FAILED,
++                       "Window %s is on workspace %d of monitor %d, "
++                       "expected workspace %s of monitor %s",
++                       window_id,
++                       window->workspace ?
++                       meta_workspace_get_index_on_monitor (window->workspace) : -1,
++                       window->workspace ?
++                       meta_workspace_get_monitor_index (window->workspace) : -1,
++                       argv[3], argv[2]);
++          return FALSE;
++        }
++    }
+   else if (strcmp (argv[0], "activate_workspace_with_focus") == 0)
+     {
+       if (argc != 3)
+@@ -3892,6 +4003,7 @@ find_metatests_in_directory (GFile     *directory,
+ }
+ 
+ static gboolean all_tests = FALSE;
++static gboolean per_monitor_workspaces = FALSE;
+ 
+ const GOptionEntry options[] = {
+   {
+@@ -3900,6 +4012,12 @@ const GOptionEntry options[] = {
+     "Run all installed tests",
+     NULL
+   },
++  {
++    "per-monitor-workspaces", 0, 0, G_OPTION_ARG_NONE,
++    &per_monitor_workspaces,
++    "Run with per-monitor workspaces",
++    NULL
++  },
+   { NULL }
+ };
+ 
+@@ -3917,6 +4035,14 @@ main (int argc, char **argv)
+ 
+   g_assert_true (meta_context_configure (context, &argc, &argv, NULL));
+ 
++  if (per_monitor_workspaces)
++    {
++      g_autoptr (GSettings) mutter = g_settings_new ("org.gnome.mutter");
++
++      g_assert_true (g_settings_set_boolean (mutter, "dynamic-workspaces", FALSE));
++      g_assert_true (g_settings_set_boolean (mutter, "per-monitor-workspaces", TRUE));
++    }
++
+   tests = g_ptr_array_new_with_free_func (g_free);
+   if (all_tests)
+     {
