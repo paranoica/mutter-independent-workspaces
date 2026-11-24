@@ -1,3 +1,4 @@
 work/
 .review/
+local.conf
 __pycache__/

@@ -1,6 +1,10 @@
 # shellcheck shell=bash disable=SC2034
 
 MIW_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ -f $MIW_ROOT/local.conf ]]; then
+  # shellcheck source=/dev/null
+  source "$MIW_ROOT/local.conf"
+fi
 MIW_WORK=${MIW_WORK:-$MIW_ROOT/work}
 MIW_PREFIX=${MIW_PREFIX:-/opt/mutter-independent-workspaces/usr}
 
