@@ -1,0 +1,204 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 15:21:09 +0300
+Subject: [PATCH] fix(window): hand the focus over to the window used last on
+ any monitor
+
+A window that went away gave the focus to the most recently used window of
+its own monitor. Without per-monitor workspaces the workspace spans every
+monitor, so the focus went back to the window used last wherever it was.
+Overlays that sit on one monitor, such as a screenshot tool, therefore left
+the focus on that monitor instead of on the window that had it before.
+
+Remember the order in which windows get the focus, and pick the most
+recently focused candidate among the active workspaces of all monitors.
+A transient window still hands the focus back to its parent first.
+---
+ src/core/window-private.h                     |  1 +
+ src/core/window.c                             | 40 +++++++++-
+ src/tests/meson.build                         |  1 +
+ ...r-monitor-workspaces-focus-recent.metatest | 78 +++++++++++++++++++
+ 4 files changed, 118 insertions(+), 2 deletions(-)
+ create mode 100644 src/tests/stacking/per-monitor-workspaces-focus-recent.metatest
+
+diff --git a/src/core/window-private.h b/src/core/window-private.h
+index 9f26a95..44c77ea 100644
+--- a/src/core/window-private.h
++++ b/src/core/window-private.h
+@@ -242,6 +242,7 @@ struct _MetaWindow
+   MetaLogicalMonitor *highest_scale_monitor;
+   MetaWorkspace *workspace;
+   MetaWorkspace *evacuated_workspace;
++  guint64 focus_serial;
+   MetaWindowClientType client_type;
+   char *desc; /* used in debug spew */
+   char *title;
+diff --git a/src/core/window.c b/src/core/window.c
+index 0372393..d2234be 100644
+--- a/src/core/window.c
++++ b/src/core/window.c
+@@ -1103,6 +1103,36 @@ get_active_workspace_for_window (MetaWindow *window)
+   return workspace ? workspace : workspace_manager->active_workspace;
+ }
+ 
++static MetaWorkspace *
++get_workspace_for_focus_fallback (MetaWindow *window)
++{
++  MetaWorkspaceManager *workspace_manager = window->display->workspace_manager;
++  MetaWorkspace *workspace = get_active_workspace_for_window (window);
++  g_autoptr (GList) active_workspaces = NULL;
++  guint64 best_serial = 0;
++  GList *l;
++
++  if (!workspace_manager->per_monitor_workspaces || window->transient_for)
++    return workspace;
++
++  active_workspaces =
++    meta_workspace_manager_get_active_workspaces (workspace_manager);
++  for (l = active_workspaces; l; l = l->next)
++    {
++      MetaWorkspace *active_workspace = l->data;
++      MetaWindow *candidate =
++        meta_workspace_get_default_focus_window (active_workspace, window);
++
++      if (candidate && candidate->focus_serial > best_serial)
++        {
++          workspace = active_workspace;
++          best_serial = candidate->focus_serial;
++        }
++    }
++
++  return workspace;
++}
++
+ /* In per-monitor mode, a window belongs to the active workspace of the
+  * monitor it is on, rather than to the globally active one. Move it there
+  * whenever it is not already on a workspace visible on that monitor.
+@@ -1693,7 +1723,7 @@ meta_window_unmanage (MetaWindow  *window,
+       meta_topic (META_DEBUG_FOCUS,
+                   "Focusing default window since we're unmanaging %s",
+                   window->desc);
+-      meta_workspace_focus_default_window (get_active_workspace_for_window (window),
++      meta_workspace_focus_default_window (get_workspace_for_focus_fallback (window),
+                                            window,
+                                            timestamp);
+     }
+@@ -2796,7 +2826,10 @@ meta_window_hide (MetaWindow *window)
+        */
+       if (my_workspace == active_workspace &&
+           !my_workspace->showing_desktop)
+-        not_this_one = window;
++        {
++          not_this_one = window;
++          active_workspace = get_workspace_for_focus_fallback (window);
++        }
+ 
+       meta_workspace_focus_default_window (active_workspace,
+                                            not_this_one,
+@@ -5918,7 +5951,10 @@ meta_window_set_focused_internal (MetaWindow *window,
+ {
+   if (focused)
+     {
++      static guint64 last_focus_serial = 0;
++
+       window->has_focus = TRUE;
++      window->focus_serial = ++last_focus_serial;
+       if (window->override_redirect)
+         return;
+ 
+diff --git a/src/tests/meson.build b/src/tests/meson.build
+index f37f64d..16ccad8 100644
+--- a/src/tests/meson.build
++++ b/src/tests/meson.build
+@@ -1433,6 +1433,7 @@ per_monitor_stacking_tests = {
+   'per-monitor-workspaces-dynamic': ['--dynamic-workspaces'],
+   'per-monitor-workspaces-focus': [],
+   'per-monitor-workspaces-focus-fallback': [],
++  'per-monitor-workspaces-focus-recent': [],
+   'per-monitor-workspaces-new-window': [],
+   'per-monitor-workspaces-reconnect': [],
+   'per-monitor-workspaces-static': [],
+diff --git a/src/tests/stacking/per-monitor-workspaces-focus-recent.metatest b/src/tests/stacking/per-monitor-workspaces-focus-recent.metatest
+new file mode 100644
+index 0000000..d487b60
+--- /dev/null
++++ b/src/tests/stacking/per-monitor-workspaces-focus-recent.metatest
+@@ -0,0 +1,78 @@
++resize_monitor default 800 600
++add_monitor secondary 800 600
++set_monitor_order default secondary
++assert_primary_monitor default
++set_pref center-new-windows false
++
++new_client w wayland
++
++move_cursor_to 400 300
++create w/1 csd
++resize w/1 300 200
++show w/1
++wait
++move w/1 100 100
++wait
++assert_window_monitor_workspace w/1 default 0
++
++move_cursor_to 1200 300
++create w/2 csd
++resize w/2 300 200
++show w/2
++wait
++move w/2 900 100
++wait
++assert_window_monitor_workspace w/2 secondary 0
++assert_focused w/2
++
++move_cursor_to 400 300
++create w/3 csd
++resize w/3 300 200
++show w/3
++wait
++assert_window_monitor_workspace w/3 default 0
++assert_focused w/3
++destroy w/3
++wait
++assert_focused w/2
++
++create w/4 csd
++resize w/4 300 200
++show w/4
++wait
++assert_window_monitor_workspace w/4 default 0
++assert_focused w/4
++minimize w/4
++wait
++assert_focused w/2
++
++local_activate w/1
++wait
++assert_focused w/1
++create w/5 csd
++resize w/5 300 200
++show w/5
++wait
++assert_window_monitor_workspace w/5 default 0
++assert_focused w/5
++destroy w/5
++wait
++assert_focused w/1
++
++create w/6 csd
++resize w/6 200 100
++set_parent w/6 1
++show w/6
++wait
++assert_window_monitor_workspace w/6 default 0
++assert_focused w/6
++move_cursor_to 1000 150
++click
++wait
++assert_focused w/2
++local_activate w/6
++wait
++assert_focused w/6
++destroy w/6
++wait
++assert_focused w/1
