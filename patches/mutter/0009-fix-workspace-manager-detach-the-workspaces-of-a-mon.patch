@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 10:59:23 +0300
+Subject: [PATCH] fix(workspace-manager): detach the workspaces of a monitor
+ that went away from it
+
+Workspaces outlive the container of an unplugged monitor but kept pointing at its freed logical monitor, which meta_workspace_get_monitor_index() and moving a window to such a workspace then read.
+---
+ src/core/meta-workspace-manager.c             |  5 ++-
+ .../per-monitor-workspaces-static.metatest    |  7 ++++
+ src/tests/test-runner.c                       | 40 +++++++++++++++++++
+ 3 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/meta-workspace-manager.c b/src/core/meta-workspace-manager.c
+index 8d02f4d..6c1d077 100644
+--- a/src/core/meta-workspace-manager.c
++++ b/src/core/meta-workspace-manager.c
+@@ -103,7 +103,10 @@ free_workspace_container (gpointer data)
+       MetaWorkspace *workspace = l->data;
+ 
+       if (workspace->container == container)
+-        workspace->container = NULL;
++        {
++          workspace->container = NULL;
++          workspace->monitor = NULL;
++        }
+     }
+ 
+   g_clear_pointer (&container->monitor_spec, meta_monitor_spec_free);
+diff --git a/src/tests/stacking/per-monitor-workspaces-static.metatest b/src/tests/stacking/per-monitor-workspaces-static.metatest
+index 4b81649..8d9efad 100644
+--- a/src/tests/stacking/per-monitor-workspaces-static.metatest
++++ b/src/tests/stacking/per-monitor-workspaces-static.metatest
+@@ -28,3 +28,10 @@ window_to_monitor_workspace w/1 secondary 1
+ wait
+ assert_window_main_monitor w/1 secondary
+ assert_window_monitor_workspace w/1 secondary 1
++
++assert_detached_workspaces 0
++remove_monitor secondary
++wait
++assert_window_main_monitor w/1 default
++assert_monitor_workspaces default 3
++assert_detached_workspaces 3
+diff --git a/src/tests/test-runner.c b/src/tests/test-runner.c
+index 8c70eba..143b8e0 100644
+--- a/src/tests/test-runner.c
++++ b/src/tests/test-runner.c
+@@ -2986,6 +2986,46 @@ test_case_do (TestCase    *test,
+ 
+       meta_window_change_workspace (window, workspace);
+     }
++  else if (strcmp (argv[0], "assert_detached_workspaces") == 0)
++    {
++      MetaDisplay *display = meta_context_get_display (test->context);
++      MetaWorkspaceManager *workspace_manager =
++        meta_display_get_workspace_manager (display);
++      GList *l;
++      int n_detached = 0;
++
++      if (argc != 2)
++        BAD_COMMAND ("usage: %s <n-workspaces>", argv[0]);
++
++      for (l = meta_workspace_manager_get_workspaces (workspace_manager); l; l = l->next)
++        {
++          MetaWorkspace *workspace = l->data;
++
++          if (workspace->container)
++            continue;
++
++          n_detached++;
++          if (workspace->monitor)
++            {
++              g_set_error (error,
++                           META_TEST_CLIENT_ERROR,
++                           META_TEST_CLIENT_ERROR_ASSERTION_FAILED,
++                           "Workspace %d has no container but still points at a monitor",
++                           meta_workspace_get_global_index (workspace));
++              return FALSE;
++            }
++        }
++
++      if (n_detached != atoi (argv[1]))
++        {
++          g_set_error (error,
++                       META_TEST_CLIENT_ERROR,
++                       META_TEST_CLIENT_ERROR_ASSERTION_FAILED,
++                       "%d workspaces have no container, expected %s",
++                       n_detached, argv[1]);
++          return FALSE;
++        }
++    }
+   else if (strcmp (argv[0], "assert_monitor_workspaces") == 0)
+     {
+       MetaDisplay *display = meta_context_get_display (test->context);
