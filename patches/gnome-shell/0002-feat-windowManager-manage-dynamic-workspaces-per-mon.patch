@@ -1,0 +1,220 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 10:46:09 +0300
+Subject: [PATCH 2/3] feat(windowManager): manage dynamic workspaces per
+ monitor
+
+Keeps one empty workspace at the end of every monitor and removes the other empty ones, using the per-monitor workspace manager API. Any window on a workspace counts, so a window being dragged to another monitor does not make its workspace look empty, and windows entering or leaving any monitor trigger a check. Drops the debug logging that ran on every check.
+---
+ js/ui/windowManager.js | 145 ++++++++++-------------------------------
+ 1 file changed, 35 insertions(+), 110 deletions(-)
+
+diff --git a/js/ui/windowManager.js b/js/ui/windowManager.js
+index 4d64337..b4fd82e 100644
+--- a/js/ui/windowManager.js
++++ b/js/ui/windowManager.js
+@@ -229,16 +229,10 @@ class WorkspaceTracker {
+         if (this._pauseWorkspaceCheck)
+             return GLib.SOURCE_CONTINUE;
+ 
+-        const perMonitorWorkspaces = this._workspaceSettings.get_boolean('per-monitor-workspaces');
+-        console.log(`WorkspaceTracker: per-monitor-workspaces=${perMonitorWorkspaces}`);
+-
+-        if (perMonitorWorkspaces) {
+-            // Per-monitor mode: check each monitor independently
++        if (global.workspace_manager.per_monitor_workspaces)
+             this._checkWorkspacesPerMonitor();
+-        } else {
+-            // Classic global mode: check workspaces globally
++        else
+             this._checkWorkspacesGlobal();
+-        }
+ 
+         this._checkWorkspacesId = 0;
+         return GLib.SOURCE_REMOVE;
+@@ -308,19 +302,7 @@ class WorkspaceTracker {
+     }
+ 
+     _checkWorkspacesPerMonitor() {
+-        const workspaceManager = global.workspace_manager;
+-
+-        // Safety check: ensure per-monitor APIs are available
+-        if (typeof workspaceManager.get_workspaces_for_monitor !== 'function') {
+-            console.warn('Per-monitor workspace APIs not available, falling back to global mode');
+-            this._checkWorkspacesGlobal();
+-            return;
+-        }
+-        console.log('WorkspaceTracker: checking per-monitor workspaces');
+-
+-        // Check each monitor independently
+         const monitors = Main.layoutManager.monitors;
+-        console.log(`WorkspaceTracker: ${monitors.length} monitors detected`);
+ 
+         for (let monitorIndex = 0; monitorIndex < monitors.length; monitorIndex++)
+             this._checkWorkspacesForMonitor(monitorIndex);
+@@ -328,117 +310,58 @@ class WorkspaceTracker {
+ 
+     _checkWorkspacesForMonitor(monitorIndex) {
+         const workspaceManager = global.workspace_manager;
++        const workspaces = workspaceManager.get_workspaces_for_monitor(monitorIndex);
++        if (!workspaces || workspaces.length === 0)
++            return;
+ 
+-        // Get workspaces for this specific monitor
+-        const workspacesOnMonitor = workspaceManager.get_workspaces_for_monitor(monitorIndex);
+-        if (!workspacesOnMonitor || workspacesOnMonitor.length === 0) {
+-            console.warn(`WorkspaceTracker: No workspaces for monitor ${monitorIndex}`);
+-            return;  // No workspaces on this monitor yet
+-        }
+-
+-        console.log(`WorkspaceTracker: Monitor ${monitorIndex} has ${workspacesOnMonitor.length} workspaces`);
+-
+-        const emptyWorkspaces = [];
+-
+-        // Mark workspaces as non-empty if they have content
+-        for (let i = 0; i < workspacesOnMonitor.length; i++) {
+-            const workspace = workspacesOnMonitor[i];
+-
+-            if (this._workspaceHasContentOnMonitor(workspace, monitorIndex))
+-                emptyWorkspaces[i] = false;
+-            else
+-                emptyWorkspaces[i] = true;
+-        }
++        const emptyWorkspaces = workspaces.map(ws => !this._workspaceHasContent(ws));
+ 
+-        // Ensure last workspace is empty
+-        const lastIndex = workspacesOnMonitor.length - 1;
+-        if (lastIndex < 0 || !emptyWorkspaces[lastIndex]) {
+-            // Need to add empty workspace at end for this monitor
+-            workspaceManager.append_new_workspace_for_monitor(
+-                monitorIndex, false, global.get_current_time()
+-            );
+-            return; // Workspace added, will trigger another check
++        const time = global.get_current_time();
++        if (!emptyWorkspaces[emptyWorkspaces.length - 1]) {
++            workspaceManager.append_new_workspace_for_monitor(monitorIndex, false, time);
++            emptyWorkspaces.push(true);
+         }
+ 
+-        // Ensure minimum 2 workspaces per monitor
+-        if (workspacesOnMonitor.length < MIN_NUM_WORKSPACES) {
+-            workspaceManager.append_new_workspace_for_monitor(
+-                monitorIndex, false, global.get_current_time()
+-            );
+-            return; // Will trigger another check
++        while (emptyWorkspaces.length < MIN_NUM_WORKSPACES) {
++            workspaceManager.append_new_workspace_for_monitor(monitorIndex, false, time);
++            emptyWorkspaces.push(true);
+         }
+ 
+-        // Get active workspace for this monitor
+-        const activeWs = workspaceManager.get_active_workspace_for_monitor(monitorIndex);
+-        const activeIndex = workspacesOnMonitor.indexOf(activeWs);
++        const activeWorkspace = workspaceManager.get_active_workspace_for_monitor(monitorIndex);
++        const activeIndex = workspaces.indexOf(activeWorkspace);
+         if (activeIndex >= 0)
+             emptyWorkspaces[activeIndex] = false;
+ 
+         const lastEmptyIndex = emptyWorkspaces.lastIndexOf(false) + 1;
++        let nWorkspaces = emptyWorkspaces.length;
+ 
+-        // Remove empty workspaces in the middle (keep last one)
+-        // Go from end to avoid index changes
+-        for (let i = lastIndex - 1; i >= 0; i--) {
+-            if (workspacesOnMonitor.length <= MIN_NUM_WORKSPACES)
++        for (let i = workspaces.length - 1; i >= 0; i--) {
++            if (nWorkspaces === MIN_NUM_WORKSPACES)
+                 break;
+             if (emptyWorkspaces[i] && i !== lastEmptyIndex) {
+-                const workspace = workspacesOnMonitor[i];
+-
+-                // Don't remove active workspace
+-                if (workspace === activeWs)
+-                    continue;
+-
+-                workspaceManager.remove_workspace(workspace, global.get_current_time());
+-                return; // Removed a workspace, will trigger another check
++                workspaceManager.remove_workspace(workspaces[i], time);
++                nWorkspaces--;
+             }
+         }
+     }
+ 
+-    _workspaceHasContentOnMonitor(workspace, monitorIndex) {
+-        // Check windows on this workspace for this specific monitor
+-        const windows = workspace.list_windows();
+-
+-        for (const window of windows) {
+-            // Skip sticky windows - they don't count as content for any specific workspace
+-            if (window.is_on_all_workspaces())
+-                continue;
+-
+-            // Does this window belong to our monitor?
+-            if (window.get_monitor() === monitorIndex)
+-                return true;
+-        }
++    _workspaceHasContent(workspace) {
++        if (workspace.list_windows().some(w => !w.is_on_all_workspaces()))
++            return true;
+ 
+-        // Check for startup sequences - these reserve workspace space
+-        // Note: Startup sequences aren't monitor-specific in current mutter API,
+-        // so we check them globally and assume they apply to primary monitor
+-        if (monitorIndex === Main.layoutManager.primaryIndex) {
+-            const sequences = Shell.WindowTracker.get_default().get_startup_sequences();
+-            for (let i = 0; i < sequences.length; i++) {
+-                const index = sequences[i].get_workspace();
+-                if (index === workspace.get_global_index())
+-                    return true;
+-            }
+-        }
++        const sequences = Shell.WindowTracker.get_default().get_startup_sequences();
++        if (sequences.some(s => s.get_workspace() === workspace.get_global_index()))
++            return true;
+ 
+-        // Check for keepAlive protection (temporary marker to prevent removal)
+         if (workspace._keepAliveId)
+             return true;
+ 
+-        // Check for lastRemovedWindow grace period
+-        // If a dialog/splash was just closed, give the app time to open its main window
+         const lastRemoved = workspace._lastRemovedWindow;
+-        if (lastRemoved) {
+-            const windowType = lastRemoved.get_window_type();
+-            if (windowType === Meta.WindowType.SPLASHSCREEN ||
+-                windowType === Meta.WindowType.DIALOG ||
+-                windowType === Meta.WindowType.MODAL_DIALOG) {
+-                // Only count this for the monitor the window was on
+-                if (lastRemoved.get_monitor() === monitorIndex)
+-                    return true;
+-            }
+-        }
+-
+-        return false;
++        return !!lastRemoved && [
++            Meta.WindowType.SPLASHSCREEN,
++            Meta.WindowType.DIALOG,
++            Meta.WindowType.MODAL_DIALOG,
++        ].includes(lastRemoved.get_window_type());
+     }
+ 
+     keepWorkspaceAlive(workspace, duration) {
+@@ -467,14 +390,16 @@ class WorkspaceTracker {
+     _windowLeftMonitor(metaDisplay, monitorIndex, _metaWin) {
+         // If the window left the primary monitor, that
+         // might make that workspace empty
+-        if (monitorIndex === Main.layoutManager.primaryIndex)
++        if (monitorIndex === Main.layoutManager.primaryIndex ||
++            global.workspace_manager.per_monitor_workspaces)
+             this._queueCheckWorkspaces();
+     }
+ 
+     _windowEnteredMonitor(metaDisplay, monitorIndex, _metaWin) {
+         // If the window entered the primary monitor, that
+         // might make that workspace non-empty
+-        if (monitorIndex === Main.layoutManager.primaryIndex)
++        if (monitorIndex === Main.layoutManager.primaryIndex ||
++            global.workspace_manager.per_monitor_workspaces)
+             this._queueCheckWorkspaces();
+     }
+ 
