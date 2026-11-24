@@ -23,6 +23,13 @@ SESSION_FILES=(
 
 MIW_EXTRA_MUTTER_PATCHES=${MIW_EXTRA_MUTTER_PATCHES:-}
 
+BUILD_INFO=$MIW_PREFIX/share/mutter-independent-workspaces/build-info
+CHECK_SCRIPT=/usr/local/bin/mutter-independent-workspaces-check
+SYSTEM_FILES=(
+  "pacman/mutter-independent-workspaces.hook:/etc/pacman.d/hooks/mutter-independent-workspaces.hook"
+  "autostart/mutter-independent-workspaces-check.desktop:/etc/xdg/autostart/mutter-independent-workspaces-check.desktop"
+)
+
 read -ra SUDO_CMD <<< "${SUDO:-sudo}"
 
 die() {

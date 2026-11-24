@@ -1,0 +1,37 @@
+#!/bin/bash
+set -u
+
+info=@BUILD_INFO@
+[[ -r $info ]] || exit 0
+
+built_mutter='' built_shell='' repo=''
+while IFS='=' read -r key value; do
+  case $key in
+    MUTTER_VERSION) built_mutter=$value ;;
+    SHELL_VERSION) built_shell=$value ;;
+    REPO) repo=$value ;;
+  esac
+done < "$info"
+
+system_mutter=$(@MUTTER@ --version 2>/dev/null | awk 'NR == 1 { print $2 }')
+system_shell=$(@GNOME_SHELL@ --version 2>/dev/null | awk '{ print $3 }')
+[[ -n $system_mutter && -n $system_shell ]] || exit 0
+[[ $system_mutter == "$built_mutter" && $system_shell == "$built_shell" ]] && exit 0
+
+rebuild="cd $repo && git pull && ./miw update"
+
+if [[ ${1:-} == --notify ]]; then
+  command -v notify-send > /dev/null || exit 0
+  notify-send -a "Independent Workspaces" -i dialog-warning \
+    "Independent Workspaces needs a rebuild" \
+    "GNOME was updated to $system_shell, the session is built for $built_shell. Run: $rebuild"
+  exit 0
+fi
+
+printf 'warning: GNOME was updated (gnome-shell %s, mutter %s), but the\n' \
+  "$system_shell" "$system_mutter"
+printf '         Independent Workspaces session is built for gnome-shell %s,\n' \
+  "$built_shell"
+printf '         mutter %s and will not start until you rebuild it:\n' "$built_mutter"
+printf '         %s\n' "$rebuild"
+exit 0

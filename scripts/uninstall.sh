@@ -4,7 +4,11 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
 note "system files (sudo)"
-for entry in "${SESSION_FILES[@]}"; do
+if [[ -e $CHECK_SCRIPT ]]; then
+  "${SUDO_CMD[@]}" rm -f -- "$CHECK_SCRIPT"
+  echo "  removed $CHECK_SCRIPT"
+fi
+for entry in "${SESSION_FILES[@]}" "${SYSTEM_FILES[@]}"; do
   dst=${entry#*:}
   if [[ -e $dst ]]; then
     "${SUDO_CMD[@]}" rm -f -- "$dst"

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Independent Workspaces build check
+Exec=@CHECK_SCRIPT@ --notify
+OnlyShowIn=GNOME;
+NoDisplay=true
+X-GNOME-Autostart-Delay=10
