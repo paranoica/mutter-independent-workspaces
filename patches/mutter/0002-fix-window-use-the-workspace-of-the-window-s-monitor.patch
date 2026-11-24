@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 10:30:00 +0300
+Subject: [PATCH] fix(window): use the workspace of the window's monitor for
+ focus and activation
+
+Activation, the MRU list and modal transients went by the global active workspace. Activating a window on another monitor only marked it as demanding attention, and focusing it did not update the MRU list, so switching back to its workspace focused another window.
+---
+ src/core/window.c | 61 ++++++++++++++++++++++++++++-------------------
+ 1 file changed, 36 insertions(+), 25 deletions(-)
+
+diff --git a/src/core/window.c b/src/core/window.c
+index 5fa9a36..ea12f40 100644
+--- a/src/core/window.c
++++ b/src/core/window.c
+@@ -1086,6 +1086,22 @@ meta_window_update_desc (MetaWindow *window)
+     }
+ }
+ 
++static MetaWorkspace *
++get_active_workspace_for_window (MetaWindow *window)
++{
++  MetaWorkspaceManager *workspace_manager = window->display->workspace_manager;
++  MetaWorkspace *workspace;
++
++  if (!workspace_manager->per_monitor_workspaces || !window->monitor)
++    return workspace_manager->active_workspace;
++
++  workspace =
++    meta_workspace_manager_get_active_workspace_for_monitor (
++      workspace_manager, meta_logical_monitor_get_number (window->monitor));
++
++  return workspace ? workspace : workspace_manager->active_workspace;
++}
++
+ /* In per-monitor mode, a window belongs to the active workspace of the
+  * monitor it is on, rather than to the globally active one. Move it there
+  * whenever it is not already on a workspace visible on that monitor.
+@@ -4003,7 +4019,6 @@ meta_window_activate_full (MetaWindow     *window,
+                            MetaClientType  source_indication,
+                            MetaWorkspace  *workspace)
+ {
+-  MetaWorkspaceManager *workspace_manager = window->display->workspace_manager;
+   gboolean allow_workspace_switch;
+ 
+   if (window->unmanaging)
+@@ -4039,7 +4054,7 @@ meta_window_activate_full (MetaWindow     *window,
+ 
+   /* Get window on current or given workspace */
+   if (workspace == NULL)
+-    workspace = workspace_manager->active_workspace;
++    workspace = get_active_workspace_for_window (window);
+ 
+   /* For non-transient windows, we just set up a pulsing indicator,
+      rather than move windows or workspaces.
+@@ -5176,12 +5191,12 @@ void
+ meta_window_focus (MetaWindow  *window,
+                    guint32      timestamp)
+ {
+-  MetaWorkspaceManager *workspace_manager = window->display->workspace_manager;
+   MetaWindow *modal_transient;
+   MetaBackend *backend;
+   ClutterStage *stage;
+   MetaWindowDrag *window_drag;
+   MetaWindow *grab_window = NULL;
++  MetaWorkspace *active_workspace;
+ 
+   g_return_if_fail (!window->override_redirect);
+ 
+@@ -5220,11 +5235,13 @@ meta_window_focus (MetaWindow  *window,
+       !modal_transient->unmanaging &&
+       meta_window_transient_can_focus (modal_transient))
+     {
++      MetaWorkspace *workspace = get_active_workspace_for_window (window);
++
+       meta_topic (META_DEBUG_FOCUS,
+                   "%s has %s as a modal transient, so focusing it instead.",
+                   window->desc, modal_transient->desc);
+-      if (!meta_window_located_on_workspace (modal_transient, workspace_manager->active_workspace))
+-        meta_window_change_workspace (modal_transient, workspace_manager->active_workspace);
++      if (!meta_window_located_on_workspace (modal_transient, workspace))
++        meta_window_change_workspace (modal_transient, workspace);
+       window = modal_transient;
+     }
+ 
+@@ -5248,10 +5265,10 @@ meta_window_focus (MetaWindow  *window,
+    * list only if the window is actually on the active
+    * workspace.
+    */
+-  if (workspace_manager->active_workspace &&
+-      meta_window_located_on_workspace (window,
+-                                        workspace_manager->active_workspace))
+-    meta_window_make_most_recent (window, workspace_manager->active_workspace);
++  active_workspace = get_active_workspace_for_window (window);
++  if (active_workspace &&
++      meta_window_located_on_workspace (window, active_workspace))
++    meta_window_make_most_recent (window, active_workspace);
+ 
+   backend = backend_from_window (window);
+   stage = CLUTTER_STAGE (meta_backend_get_stage (backend));
+@@ -5668,35 +5685,31 @@ static gboolean
+ lower_window_and_transients (MetaWindow *window,
+                              gpointer    user_data)
+ {
+-  MetaWorkspaceManager *workspace_manager = window->display->workspace_manager;
+-
+   meta_window_lower (window);
+ 
+   meta_window_foreach_transient (window, lower_window_and_transients, NULL);
+ 
+   if (meta_prefs_get_raise_on_click ())
+     {
++      MetaWorkspace *active_workspace = get_active_workspace_for_window (window);
++
+       /* Move window to the back of the focusing workspace's MRU list.
+        * Do extra sanity checks to avoid possible race conditions.
+        * (Borrowed from window.c.)
+        */
+-      if (workspace_manager->active_workspace &&
+-          meta_window_located_on_workspace (window,
+-                                            workspace_manager->active_workspace))
++      if (active_workspace &&
++          meta_window_located_on_workspace (window, active_workspace))
+         {
+           GList *link;
+-          link = g_list_find (workspace_manager->active_workspace->mru_list,
+-                              window);
++          link = g_list_find (active_workspace->mru_list, window);
+           g_assert (link);
+ 
+-          workspace_manager->active_workspace->mru_list =
+-            g_list_remove_link (workspace_manager->active_workspace->mru_list,
+-                                link);
++          active_workspace->mru_list =
++            g_list_remove_link (active_workspace->mru_list, link);
+           g_list_free (link);
+ 
+-          workspace_manager->active_workspace->mru_list =
+-            g_list_append (workspace_manager->active_workspace->mru_list,
+-                           window);
++          active_workspace->mru_list =
++            g_list_append (active_workspace->mru_list, window);
+         }
+     }
+ 
+@@ -5707,15 +5720,13 @@ void
+ meta_window_lower_with_transients (MetaWindow *window,
+                                    uint32_t    timestamp)
+ {
+-  MetaWorkspaceManager *workspace_manager = window->display->workspace_manager;
+-
+   lower_window_and_transients (window, NULL);
+ 
+   /* Rather than try to figure that out whether we just lowered
+    * the focus window, assume that's always the case. (Typically,
+    * this will be invoked via keyboard action or by a mouse action;
+    * in either case the window or a modal child will have been focused.) */
+-  meta_workspace_focus_default_window (workspace_manager->active_workspace,
++  meta_workspace_focus_default_window (get_active_workspace_for_window (window),
+                                        NULL,
+                                        timestamp);
+ }
