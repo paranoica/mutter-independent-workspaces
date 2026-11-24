@@ -1,0 +1,370 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 10:40:22 +0300
+Subject: [PATCH] feat(workspace-manager): support dynamic workspaces per
+ monitor
+
+Per-monitor mode no longer requires static workspaces. Each monitor starts with one workspace when they are dynamic, and the shell adds and removes them with the new meta_workspace_manager_append_new_workspace_for_monitor() and meta_workspace_manager_reorder_workspace_on_monitor(). Removing a workspace hands its windows to a neighbour on the same monitor, and changing the number of static workspaces resizes every monitor instead of cutting the global list.
+---
+ src/core/meta-workspace-manager.c | 232 +++++++++++++++++++++++++-----
+ src/meta/meta-workspace-manager.h |  11 ++
+ src/x11/meta-x11-display.c        |   3 +-
+ 3 files changed, 209 insertions(+), 37 deletions(-)
+
+diff --git a/src/core/meta-workspace-manager.c b/src/core/meta-workspace-manager.c
+index 3c93451..8d02f4d 100644
+--- a/src/core/meta-workspace-manager.c
++++ b/src/core/meta-workspace-manager.c
+@@ -117,6 +117,77 @@ is_per_monitor_mode (MetaWorkspaceManager *workspace_manager)
+   return workspace_manager->per_monitor_workspaces;
+ }
+ 
++static int
++get_initial_num_workspaces (void)
++{
++  if (meta_prefs_get_dynamic_workspaces ())
++    return 1;
++
++  return meta_prefs_get_num_workspaces ();
++}
++
++static MetaWorkspace *
++container_append_workspace (MetaWorkspaceManager   *workspace_manager,
++                            MetaWorkspaceContainer *container)
++{
++  MetaWorkspace *workspace = meta_workspace_new (workspace_manager);
++
++  workspace->monitor = container->monitor;
++  workspace->container = container;
++  container->workspaces = g_list_append (container->workspaces, workspace);
++
++  return workspace;
++}
++
++static MetaWorkspace *
++append_workspace_to_container (MetaWorkspaceManager   *workspace_manager,
++                               MetaWorkspaceContainer *container,
++                               gboolean                activate,
++                               guint32                 timestamp)
++{
++  MetaWorkspace *workspace =
++    container_append_workspace (workspace_manager, container);
++
++  if (activate)
++    meta_workspace_activate (workspace, timestamp);
++
++  meta_display_queue_workarea_recalc (workspace_manager->display);
++
++  g_signal_emit (workspace_manager,
++                 workspace_manager_signals[WORKSPACE_ADDED],
++                 0, meta_workspace_get_global_index (workspace));
++  g_object_notify (G_OBJECT (workspace_manager), "n-workspaces");
++
++  return workspace;
++}
++
++static void
++update_num_workspaces_per_monitor (MetaWorkspaceManager *workspace_manager,
++                                   guint32               timestamp,
++                                   int                   new_num)
++{
++  GHashTableIter iter;
++  gpointer value;
++
++  g_hash_table_iter_init (&iter, workspace_manager->workspace_containers);
++  while (g_hash_table_iter_next (&iter, NULL, &value))
++    {
++      MetaWorkspaceContainer *container = value;
++
++      while ((int) g_list_length (container->workspaces) > new_num)
++        {
++          MetaWorkspace *last = g_list_last (container->workspaces)->data;
++
++          meta_workspace_manager_remove_workspace (workspace_manager,
++                                                   last, timestamp);
++        }
++
++      while ((int) g_list_length (container->workspaces) < new_num)
++        append_workspace_to_container (workspace_manager, container,
++                                       FALSE, timestamp);
++    }
++}
++
+ /**
+  * meta_workspace_manager_remove_from_container:
+  * @workspace_manager: a #MetaWorkspaceManager
+@@ -326,13 +397,8 @@ meta_workspace_manager_new (MetaDisplay *display)
+   workspace_manager->vertical_workspaces = FALSE;
+   workspace_manager->starting_corner = META_DISPLAY_TOPLEFT;
+ 
+-  /* Per-monitor workspaces are limited to static workspaces for now. With
+-   * dynamic workspaces the shell is expected to actively manage the workspace
+-   * set, which has no per-monitor counterpart yet.
+-   */
+   workspace_manager->per_monitor_workspaces =
+-    meta_prefs_get_per_monitor_workspaces () &&
+-    !meta_prefs_get_dynamic_workspaces ();
++    meta_prefs_get_per_monitor_workspaces ();
+   workspace_manager->workspace_containers = NULL;
+ 
+   if (workspace_manager->per_monitor_workspaces)
+@@ -433,8 +499,7 @@ meta_workspace_manager_setup_per_monitor_workspaces (MetaWorkspaceManager *works
+               "Setting up per-monitor workspaces for %d monitors",
+               g_list_length (logical_monitors));
+ 
+-  /* Per-monitor mode implies static workspaces */
+-  num_workspaces = meta_prefs_get_num_workspaces ();
++  num_workspaces = get_initial_num_workspaces ();
+ 
+   /* Clear any existing global workspaces created during init */
+   while (workspace_manager->workspaces)
+@@ -472,14 +537,7 @@ meta_workspace_manager_setup_per_monitor_workspaces (MetaWorkspaceManager *works
+       /* Create initial workspaces for this monitor */
+       for (i = 0; i < num_workspaces; i++)
+         {
+-          MetaWorkspace *workspace = meta_workspace_new (workspace_manager);
+-
+-          workspace->monitor = monitor;
+-          workspace->container = container;
+-
+-          /* The workspace was already added to the global pool by
+-             meta_workspace_new() */
+-          container->workspaces = g_list_append (container->workspaces, workspace);
++          container_append_workspace (workspace_manager, container);
+ 
+           meta_topic (META_DEBUG_WORKSPACES,
+                       "Created workspace %d for monitor %d (pointer=%p)",
+@@ -589,7 +647,7 @@ meta_workspace_manager_monitors_changed (MetaWorkspaceManager *workspace_manager
+                            NULL,
+                            free_workspace_container);
+ 
+-  num_workspaces = meta_prefs_get_num_workspaces ();
++  num_workspaces = get_initial_num_workspaces ();
+ 
+   for (l = logical_monitors; l; l = l->next)
+     {
+@@ -642,13 +700,7 @@ meta_workspace_manager_monitors_changed (MetaWorkspaceManager *workspace_manager
+             monitor_spec ? meta_monitor_spec_clone (monitor_spec) : NULL;
+           created_workspaces = TRUE;
+           for (i = 0; i < num_workspaces; i++)
+-            {
+-              MetaWorkspace *workspace = meta_workspace_new (workspace_manager);
+-
+-              workspace->monitor = monitor;
+-              workspace->container = container;
+-              container->workspaces = g_list_append (container->workspaces, workspace);
+-            }
++            container_append_workspace (workspace_manager, container);
+           if (container->workspaces)
+             container->active_workspace = container->workspaces->data;
+         }
+@@ -718,20 +770,42 @@ meta_workspace_manager_remove_workspace (MetaWorkspaceManager *workspace_manager
+ 
+   next = l->next;
+ 
+-  if (l->prev)
+-    neighbour = l->prev->data;
+-  else if (l->next)
+-    neighbour = l->next->data;
+-  else
++  if (is_per_monitor_mode (workspace_manager) && workspace->container)
+     {
+-      /* Cannot remove the only workspace! */
+-      return;
++      MetaWorkspaceContainer *container = workspace->container;
++      GList *link = g_list_find (container->workspaces, workspace);
++
++      if (link->prev)
++        neighbour = link->prev->data;
++      else if (link->next)
++        neighbour = link->next->data;
++      else
++        return;
++
++      meta_workspace_relocate_windows (workspace, neighbour);
++
++      if (workspace == container->active_workspace)
++        meta_workspace_activate (neighbour, timestamp);
++      if (workspace == workspace_manager->active_workspace)
++        workspace_manager->active_workspace = neighbour;
+     }
++  else
++    {
++      if (l->prev)
++        neighbour = l->prev->data;
++      else if (l->next)
++        neighbour = l->next->data;
++      else
++        {
++          /* Cannot remove the only workspace! */
++          return;
++        }
+ 
+-  meta_workspace_relocate_windows (workspace, neighbour);
++      meta_workspace_relocate_windows (workspace, neighbour);
+ 
+-  if (workspace == workspace_manager->active_workspace)
+-    meta_workspace_activate (neighbour, timestamp);
++      if (workspace == workspace_manager->active_workspace)
++        meta_workspace_activate (neighbour, timestamp);
++    }
+ 
+   /* To emit the signal after removing the workspace */
+   index = meta_workspace_get_global_index (workspace);
+@@ -744,7 +818,8 @@ meta_workspace_manager_remove_workspace (MetaWorkspaceManager *workspace_manager
+ 
+   new_num = g_list_length (workspace_manager->workspaces);
+ 
+-  if (!meta_prefs_get_dynamic_workspaces ())
++  if (!meta_prefs_get_dynamic_workspaces () &&
++      !is_per_monitor_mode (workspace_manager))
+     meta_prefs_set_num_workspaces (new_num);
+ 
+   /* If deleting a workspace before the current workspace, the active
+@@ -754,7 +829,10 @@ meta_workspace_manager_remove_workspace (MetaWorkspaceManager *workspace_manager
+                    workspace_manager_signals[ACTIVE_WORKSPACE_CHANGED],
+                    0, NULL);
+ 
+-  for (l = next; l; l = l->next)
++  for (l = is_per_monitor_mode (workspace_manager) ?
++             workspace_manager->workspaces : next;
++       l;
++       l = l->next)
+     {
+       MetaWorkspace *w = l->data;
+       meta_workspace_index_changed (w);
+@@ -789,6 +867,15 @@ meta_workspace_manager_append_new_workspace (MetaWorkspaceManager *workspace_man
+   MetaWorkspace *w;
+   int new_num;
+ 
++  if (is_per_monitor_mode (workspace_manager))
++    {
++      int monitor_index =
++        meta_display_get_current_monitor (workspace_manager->display);
++
++      return meta_workspace_manager_append_new_workspace_for_monitor (
++        workspace_manager, monitor_index, activate, timestamp);
++    }
++
+   /* This also adds the workspace to the workspace manager list */
+   w = meta_workspace_new (workspace_manager);
+ 
+@@ -826,6 +913,12 @@ meta_workspace_manager_update_num_workspaces (MetaWorkspaceManager *workspace_ma
+ 
+   g_assert (new_num > 0);
+ 
++  if (is_per_monitor_mode (workspace_manager))
++    {
++      update_num_workspaces_per_monitor (workspace_manager, timestamp, new_num);
++      return;
++    }
++
+   if (g_list_length (workspace_manager->workspaces) == (guint) new_num)
+     return;
+ 
+@@ -1683,3 +1776,70 @@ meta_workspace_manager_get_active_workspace_for_monitor (MetaWorkspaceManager *w
+   return container->active_workspace;
+ }
+ 
++static MetaWorkspaceContainer *
++get_container_for_monitor_index (MetaWorkspaceManager *workspace_manager,
++                                 int                   monitor_index)
++{
++  MetaLogicalMonitor *monitor;
++
++  monitor = get_monitor_by_index (workspace_manager, monitor_index);
++  if (!monitor)
++    return NULL;
++
++  return g_hash_table_lookup (workspace_manager->workspace_containers, monitor);
++}
++
++/**
++ * meta_workspace_manager_append_new_workspace_for_monitor:
++ * Returns: (transfer none) (nullable):
++ */
++MetaWorkspace *
++meta_workspace_manager_append_new_workspace_for_monitor (MetaWorkspaceManager *workspace_manager,
++                                                         int                   monitor_index,
++                                                         gboolean              activate,
++                                                         guint32               timestamp)
++{
++  MetaWorkspaceContainer *container;
++
++  g_return_val_if_fail (META_IS_WORKSPACE_MANAGER (workspace_manager), NULL);
++  g_return_val_if_fail (is_per_monitor_mode (workspace_manager), NULL);
++
++  container = get_container_for_monitor_index (workspace_manager, monitor_index);
++  if (!container)
++    return NULL;
++
++  return append_workspace_to_container (workspace_manager, container,
++                                        activate, timestamp);
++}
++
++void
++meta_workspace_manager_reorder_workspace_on_monitor (MetaWorkspaceManager *workspace_manager,
++                                                     MetaWorkspace        *workspace,
++                                                     int                   new_index)
++{
++  MetaWorkspaceContainer *container;
++  GList *l;
++
++  g_return_if_fail (META_IS_WORKSPACE_MANAGER (workspace_manager));
++  g_return_if_fail (is_per_monitor_mode (workspace_manager));
++  g_return_if_fail (META_IS_WORKSPACE (workspace) && workspace->container);
++
++  container = workspace->container;
++  g_return_if_fail (new_index >= 0 &&
++                    new_index < (int) g_list_length (container->workspaces));
++
++  if (g_list_index (container->workspaces, workspace) == new_index)
++    return;
++
++  container->workspaces = g_list_remove (container->workspaces, workspace);
++  container->workspaces = g_list_insert (container->workspaces, workspace,
++                                         new_index);
++
++  for (l = container->workspaces; l; l = l->next)
++    meta_workspace_index_changed (l->data);
++
++  meta_display_queue_workarea_recalc (workspace_manager->display);
++  g_signal_emit (workspace_manager,
++                 workspace_manager_signals[WORKSPACES_REORDERED], 0, NULL);
++}
++
+diff --git a/src/meta/meta-workspace-manager.h b/src/meta/meta-workspace-manager.h
+index 1adc9ec..0ec0492 100644
+--- a/src/meta/meta-workspace-manager.h
++++ b/src/meta/meta-workspace-manager.h
+@@ -88,5 +88,16 @@ META_EXPORT
+ MetaWorkspace * meta_workspace_manager_get_active_workspace_for_monitor (MetaWorkspaceManager *workspace_manager,
+                                                                          int                   monitor_index);
+ 
++META_EXPORT
++MetaWorkspace * meta_workspace_manager_append_new_workspace_for_monitor (MetaWorkspaceManager *workspace_manager,
++                                                                         int                   monitor_index,
++                                                                         gboolean              activate,
++                                                                         guint32               timestamp);
++
++META_EXPORT
++void meta_workspace_manager_reorder_workspace_on_monitor (MetaWorkspaceManager *workspace_manager,
++                                                          MetaWorkspace        *workspace,
++                                                          int                   new_index);
++
+ META_EXPORT
+ int meta_workspace_manager_get_layout_rows (MetaWorkspaceManager *workspace_manager);
+diff --git a/src/x11/meta-x11-display.c b/src/x11/meta-x11-display.c
+index 9fd4537..8ac37bd 100644
+--- a/src/x11/meta-x11-display.c
++++ b/src/x11/meta-x11-display.c
+@@ -1353,7 +1353,8 @@ meta_x11_display_new (MetaDisplay  *display,
+ 
+   meta_x11_display_update_workspace_layout (x11_display);
+ 
+-  if (meta_prefs_get_dynamic_workspaces ())
++  if (meta_prefs_get_dynamic_workspaces () &&
++      !meta_prefs_get_per_monitor_workspaces ())
+     {
+       int num = 0;
+       int n_items = 0;
