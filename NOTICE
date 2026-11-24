@@ -1,0 +1,17 @@
+mutter-independent-workspaces packages and builds patches written by others,
+plus its own patches on top of them.
+
+The 0000 patches in patches/ come from these merge requests:
+
+  GNOME/mutter!5194
+  https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/5194
+
+  GNOME/gnome-shell!4299
+  https://gitlab.gnome.org/GNOME/gnome-shell/-/merge_requests/4299
+
+by Victor C. (vicajilau), based on earlier work by Chris Willingham
+(GNOME/mutter!4864, GNOME/gnome-shell!4049).
+
+mutter and gnome-shell are developed by the GNOME project and licensed under
+the GNU General Public License, version 2 or later. This repository uses the
+same license; see COPYING.
