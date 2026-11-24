@@ -1,0 +1,558 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 13:58:35 +0300
+Subject: [PATCH] fix(workspace-manager): give a monitor that comes back its
+ workspaces and windows
+
+When a monitor went away, its container was freed and a new one with fresh
+workspaces was made when it came back. Its windows were moved to the active
+workspace of another monitor and stayed there. Twin monitors that share the
+vendor, product and serial also share the logical monitor id, so the
+preferred monitor of a window could not tell them apart either.
+
+Keep the container of a monitor that went away, detached, and hand it back
+when a monitor with the same spec, connector included, appears again.
+Remember the workspace each window was moved off, and put the window back
+on it and on its monitor when the container returns, unless the window was
+moved to another workspace or monitor in the meantime. While monitors
+change, keep a window on the monitor of its workspace, and move the global
+active workspace to the primary monitor when its own monitor went away.
+---
+ src/core/meta-workspace-manager-private.h     |   1 +
+ src/core/meta-workspace-manager.c             | 127 +++++++++++++++++-
+ src/core/window-private.h                     |   1 +
+ src/core/window.c                             |  34 +++++
+ src/tests/meson.build                         |   1 +
+ src/tests/meta-test-utils.c                   |  19 ++-
+ src/tests/meta-test-utils.h                   |   7 +
+ .../per-monitor-workspaces-reconnect.metatest | 106 +++++++++++++++
+ src/tests/test-runner.c                       |  38 +++++-
+ 9 files changed, 327 insertions(+), 7 deletions(-)
+ create mode 100644 src/tests/stacking/per-monitor-workspaces-reconnect.metatest
+
+diff --git a/src/core/meta-workspace-manager-private.h b/src/core/meta-workspace-manager-private.h
+index 52ca888..1c89078 100644
+--- a/src/core/meta-workspace-manager-private.h
++++ b/src/core/meta-workspace-manager-private.h
+@@ -65,6 +65,7 @@ struct _MetaWorkspaceManager
+   gboolean per_monitor_workspaces;
+   /* MetaLogicalMonitor * -> MetaWorkspaceContainer * */
+   GHashTable *workspace_containers;
++  GList *detached_containers;
+ 
+   int rows_of_workspaces;
+   int columns_of_workspaces;
+diff --git a/src/core/meta-workspace-manager.c b/src/core/meta-workspace-manager.c
+index 6c1d077..296588b 100644
+--- a/src/core/meta-workspace-manager.c
++++ b/src/core/meta-workspace-manager.c
+@@ -114,6 +114,71 @@ free_workspace_container (gpointer data)
+   g_free (container);
+ }
+ 
++static void
++detach_workspace_container (MetaWorkspaceManager   *workspace_manager,
++                            MetaWorkspaceContainer *container)
++{
++  GList *l;
++
++  for (l = container->workspaces; l; l = l->next)
++    {
++      MetaWorkspace *workspace = l->data;
++
++      if (workspace->container == container)
++        {
++          workspace->container = NULL;
++          workspace->monitor = NULL;
++        }
++    }
++
++  container->monitor = NULL;
++  workspace_manager->detached_containers =
++    g_list_prepend (workspace_manager->detached_containers, container);
++}
++
++static MetaWorkspaceContainer *
++reattach_workspace_container (MetaWorkspaceManager *workspace_manager,
++                              MetaLogicalMonitor   *monitor,
++                              MetaMonitorSpec      *monitor_spec)
++{
++  GList *l;
++
++  if (!monitor_spec)
++    return NULL;
++
++  for (l = workspace_manager->detached_containers; l; l = l->next)
++    {
++      MetaWorkspaceContainer *container = l->data;
++      GList *wl;
++
++      if (!container->monitor_spec ||
++          !meta_monitor_spec_equals (container->monitor_spec, monitor_spec))
++        continue;
++
++      workspace_manager->detached_containers =
++        g_list_delete_link (workspace_manager->detached_containers, l);
++
++      if (!container->workspaces)
++        {
++          free_workspace_container (container);
++          return NULL;
++        }
++
++      container->monitor = monitor;
++      for (wl = container->workspaces; wl; wl = wl->next)
++        {
++          MetaWorkspace *workspace = wl->data;
++
++          workspace->container = container;
++          workspace->monitor = monitor;
++        }
++
++      return container;
++    }
++
++  return NULL;
++}
++
+ static gboolean
+ is_per_monitor_mode (MetaWorkspaceManager *workspace_manager)
+ {
+@@ -208,7 +273,20 @@ meta_workspace_manager_remove_from_container (MetaWorkspaceManager *workspace_ma
+   MetaWorkspaceContainer *container = workspace->container;
+ 
+   if (!container)
+-    return;
++    {
++      GList *l;
++
++      for (l = workspace_manager->detached_containers; l; l = l->next)
++        {
++          MetaWorkspaceContainer *detached = l->data;
++
++          detached->workspaces = g_list_remove (detached->workspaces, workspace);
++          if (detached->active_workspace == workspace)
++            detached->active_workspace =
++              detached->workspaces ? detached->workspaces->data : NULL;
++        }
++      return;
++    }
+ 
+   meta_topic (META_DEBUG_WORKSPACES,
+               "Removing workspace %d from the container of monitor %p",
+@@ -270,6 +348,8 @@ meta_workspace_manager_finalize (GObject *object)
+   /* Cleanup per-monitor workspace states */
+   if (workspace_manager->workspace_containers)
+     g_hash_table_destroy (workspace_manager->workspace_containers);
++  g_list_free_full (g_steal_pointer (&workspace_manager->detached_containers),
++                    free_workspace_container);
+ 
+   G_OBJECT_CLASS (meta_workspace_manager_parent_class)->finalize (object);
+ }
+@@ -612,7 +692,10 @@ meta_workspace_manager_monitors_changed (MetaWorkspaceManager *workspace_manager
+     meta_backend_get_monitor_manager (backend);
+   GList *logical_monitors, *l;
+   GHashTable *old_states;
++  GHashTableIter old_iter;
++  gpointer old_container;
+   gboolean created_workspaces = FALSE;
++  gboolean reattached_workspaces = FALSE;
+   int num_workspaces, i;
+ 
+   if (!workspace_manager->per_monitor_workspaces)
+@@ -688,6 +771,17 @@ meta_workspace_manager_monitors_changed (MetaWorkspaceManager *workspace_manager
+           for (GList *wl = container->workspaces; wl; wl = wl->next)
+             ((MetaWorkspace *)wl->data)->monitor = monitor;
+         }
++      else if ((container = reattach_workspace_container (workspace_manager,
++                                                          monitor,
++                                                          monitor_spec)))
++        {
++          reattached_workspaces = TRUE;
++          meta_topic (META_DEBUG_WORKSPACES,
++                      "Monitor %d (%s) got its %d workspaces back",
++                      meta_logical_monitor_get_number (monitor),
++                      container->monitor_spec->connector,
++                      g_list_length (container->workspaces));
++        }
+       else
+         {
+           meta_topic (META_DEBUG_WORKSPACES,
+@@ -711,8 +805,39 @@ meta_workspace_manager_monitors_changed (MetaWorkspaceManager *workspace_manager
+       g_hash_table_insert (workspace_manager->workspace_containers, monitor, container);
+     }
+ 
++  g_hash_table_iter_init (&old_iter, old_states);
++  while (g_hash_table_iter_next (&old_iter, NULL, &old_container))
++    {
++      g_hash_table_iter_steal (&old_iter);
++      detach_workspace_container (workspace_manager, old_container);
++    }
++
+   g_hash_table_destroy (old_states);
+ 
++  if (reattached_workspaces && !meta_prefs_get_dynamic_workspaces ())
++    update_num_workspaces_per_monitor (
++      workspace_manager,
++      meta_display_get_current_time_roundtrip (workspace_manager->display),
++      meta_prefs_get_num_workspaces ());
++
++  if (workspace_manager->active_workspace &&
++      !workspace_manager->active_workspace->container)
++    {
++      MetaLogicalMonitor *primary =
++        meta_monitor_manager_get_primary_logical_monitor (monitor_manager);
++      MetaWorkspaceContainer *primary_container =
++        g_hash_table_lookup (workspace_manager->workspace_containers, primary);
++
++      if (primary_container && primary_container->active_workspace)
++        {
++          workspace_manager->active_workspace =
++            primary_container->active_workspace;
++          g_signal_emit (workspace_manager,
++                         workspace_manager_signals[ACTIVE_WORKSPACE_CHANGED],
++                         0, NULL);
++        }
++    }
++
+   /* Same as in the initial setup: workspaces created for monitors that just
+    * appeared did not go through the usual add path.
+    */
+diff --git a/src/core/window-private.h b/src/core/window-private.h
+index 00abada..9f26a95 100644
+--- a/src/core/window-private.h
++++ b/src/core/window-private.h
+@@ -241,6 +241,7 @@ struct _MetaWindow
+   MetaLogicalMonitor *target_monitor;
+   MetaLogicalMonitor *highest_scale_monitor;
+   MetaWorkspace *workspace;
++  MetaWorkspace *evacuated_workspace;
+   MetaWindowClientType client_type;
+   char *desc; /* used in debug spew */
+   char *title;
+diff --git a/src/core/window.c b/src/core/window.c
+index 8ab681a..9b27337 100644
+--- a/src/core/window.c
++++ b/src/core/window.c
+@@ -388,6 +388,7 @@ meta_window_finalize (GObject *object)
+ 
+   g_clear_object (&window->transient_for);
+   g_clear_object (&window->cgroup_path);
++  g_clear_weak_pointer (&window->evacuated_workspace);
+   g_clear_pointer (&window->preferred_logical_monitor,
+                    meta_logical_monitor_id_free);
+   g_clear_object (&window->monitor);
+@@ -1126,6 +1127,20 @@ update_active_workspace (MetaWindow *window)
+       window->workspace->monitor == window->monitor)
+     return;
+ 
++  if (window->evacuated_workspace &&
++      window->evacuated_workspace->container &&
++      window->evacuated_workspace->monitor == window->monitor)
++    {
++      MetaWorkspace *workspace = window->evacuated_workspace;
++
++      g_clear_weak_pointer (&window->evacuated_workspace);
++      set_workspace_state (window, FALSE, workspace);
++      return;
++    }
++
++  if (window->workspace && !window->workspace->monitor)
++    g_set_weak_pointer (&window->evacuated_workspace, window->workspace);
++
+   monitor_index = meta_logical_monitor_get_number (window->monitor);
+   active_on_monitor =
+     meta_workspace_manager_get_active_workspace_for_monitor (workspace_manager,
+@@ -4249,6 +4264,15 @@ meta_window_find_monitor_from_id (MetaWindow *window)
+         meta_monitor_manager_get_primary_logical_monitor (monitor_manager);
+     }
+ 
++  if (window->evacuated_workspace &&
++      window->evacuated_workspace->container &&
++      window->evacuated_workspace->monitor)
++    return window->evacuated_workspace->monitor;
++
++  if (window->display->workspace_manager->per_monitor_workspaces &&
++      window->workspace && window->workspace->monitor)
++    return window->workspace->monitor;
++
+   return new_monitor;
+ }
+ 
+@@ -4622,6 +4646,10 @@ meta_window_move_resize_internal (MetaWindow          *window,
+       meta_window_update_monitor (window, update_monitor_flags);
+       new_id = meta_logical_monitor_get_id (window->monitor);
+ 
++      if (old_monitor != window->monitor &&
++          flags & META_MOVE_RESIZE_MOVE_ACTION && flags & META_MOVE_RESIZE_USER_ACTION)
++        g_clear_weak_pointer (&window->evacuated_workspace);
++
+       if (!meta_logical_monitor_id_equal (old_id, new_id) &&
+           flags & META_MOVE_RESIZE_MOVE_ACTION && flags & META_MOVE_RESIZE_USER_ACTION)
+         {
+@@ -4800,6 +4828,7 @@ meta_window_move_to_monitor_internal (MetaWindow          *window,
+ {
+   MtkRectangle old_area, new_area;
+ 
++  g_clear_weak_pointer (&window->evacuated_workspace);
+   meta_window_set_target_monitor_from_number (window, monitor);
+ 
+   if (meta_window_config_get_tile_mode (window->config) != META_TILE_NONE)
+@@ -5327,6 +5356,9 @@ set_workspace_state (MetaWindow    *window,
+ 
+   window->in_workspace_change = TRUE;
+ 
++  if (on_all_workspaces)
++    g_clear_weak_pointer (&window->evacuated_workspace);
++
+   if (window->workspace)
+     meta_workspace_remove_window (window->workspace, window);
+   else if (window->on_all_workspaces)
+@@ -5447,6 +5479,8 @@ meta_window_change_workspace_without_transients (MetaWindow    *window,
+   if (window->on_all_workspaces)
+     return;
+ 
++  g_clear_weak_pointer (&window->evacuated_workspace);
++
+   if (window->workspace == workspace)
+     return;
+ 
+diff --git a/src/tests/meson.build b/src/tests/meson.build
+index 502cbf0..9e7787b 100644
+--- a/src/tests/meson.build
++++ b/src/tests/meson.build
+@@ -1433,6 +1433,7 @@ per_monitor_stacking_tests = {
+   'per-monitor-workspaces-dynamic': ['--dynamic-workspaces'],
+   'per-monitor-workspaces-focus': [],
+   'per-monitor-workspaces-new-window': [],
++  'per-monitor-workspaces-reconnect': [],
+   'per-monitor-workspaces-static': [],
+ }
+ 
+diff --git a/src/tests/meta-test-utils.c b/src/tests/meta-test-utils.c
+index ce37d35..c82fca6 100644
+--- a/src/tests/meta-test-utils.c
++++ b/src/tests/meta-test-utils.c
+@@ -937,16 +937,29 @@ meta_create_test_monitor (MetaContext *context,
+                           int          width,
+                           int          height,
+                           float        refresh_rate)
++{
++  static int serial_count = 0x10000;
++  g_autofree char *serial = NULL;
++
++  serial = g_strdup_printf ("0x%x", serial_count++);
++
++  return meta_create_test_monitor_with_serial (context, width, height,
++                                               refresh_rate, serial);
++}
++
++MetaVirtualMonitor *
++meta_create_test_monitor_with_serial (MetaContext *context,
++                                      int          width,
++                                      int          height,
++                                      float        refresh_rate,
++                                      const char  *serial)
+ {
+   MetaBackend *backend = meta_context_get_backend (context);
+   MetaMonitorManager *monitor_manager = meta_backend_get_monitor_manager (backend);
+   g_autoptr (MetaVirtualMonitorInfo) monitor_info = NULL;
+   g_autoptr (GError) error = NULL;
+-  static int serial_count = 0x10000;
+-  g_autofree char *serial = NULL;
+   MetaVirtualMonitor *virtual_monitor;
+ 
+-  serial = g_strdup_printf ("0x%x", serial_count++);
+   monitor_info = meta_virtual_monitor_info_new_simple (width, height,
+                                                        refresh_rate,
+                                                        "MetaTestVendor",
+diff --git a/src/tests/meta-test-utils.h b/src/tests/meta-test-utils.h
+index 62e7d6b..489f15b 100644
+--- a/src/tests/meta-test-utils.h
++++ b/src/tests/meta-test-utils.h
+@@ -141,6 +141,13 @@ MetaVirtualMonitor * meta_create_test_monitor (MetaContext *context,
+                                                int          height,
+                                                float        refresh_rate);
+ 
++META_EXPORT
++MetaVirtualMonitor * meta_create_test_monitor_with_serial (MetaContext *context,
++                                                           int          width,
++                                                           int          height,
++                                                           float        refresh_rate,
++                                                           const char  *serial);
++
+ META_EXPORT
+ void meta_flush_input (MetaContext *context);
+ 
+diff --git a/src/tests/stacking/per-monitor-workspaces-reconnect.metatest b/src/tests/stacking/per-monitor-workspaces-reconnect.metatest
+new file mode 100644
+index 0000000..11a69a3
+--- /dev/null
++++ b/src/tests/stacking/per-monitor-workspaces-reconnect.metatest
+@@ -0,0 +1,106 @@
++resize_monitor default 800 600
++add_monitor secondary 800 600 0x10000
++add_monitor third 800 600 0x10000
++set_monitor_order default secondary third
++assert_primary_monitor default
++set_pref center-new-windows false
++num_workspaces 3
++assert_monitor_workspaces default 3
++assert_monitor_workspaces secondary 3
++assert_monitor_workspaces third 3
++
++new_client w wayland
++move_cursor_to 400 300
++create w/1 csd
++resize w/1 300 200
++show w/1
++wait
++assert_window_monitor_workspace w/1 default 0
++
++move_cursor_to 1200 300
++activate_monitor_workspace secondary 1
++create w/2 csd
++resize w/2 300 200
++show w/2
++wait
++move w/2 1000 100
++create w/8 csd
++resize w/8 300 200
++show w/8
++wait
++assert_window_monitor_workspace w/2 secondary 1
++assert_window_monitor_workspace w/8 secondary 1
++assert_position w/2 1000 100
++
++activate_monitor_workspace secondary 2
++create w/3 csd
++resize w/3 300 200
++show w/3
++create w/4 csd
++resize w/4 300 200
++show w/4
++create w/6 csd
++resize w/6 300 200
++show w/6
++create w/7 csd
++resize w/7 300 200
++show w/7
++wait
++assert_window_monitor_workspace w/3 secondary 2
++assert_window_monitor_workspace w/4 secondary 2
++assert_window_monitor_workspace w/6 secondary 2
++assert_window_monitor_workspace w/7 secondary 2
++assert_monitor_workspace_active secondary 2
++assert_global_active_workspace secondary 2
++
++move_cursor_to 400 300
++remove_monitor secondary
++set_monitor_order default third
++wait
++assert_global_active_workspace default 0
++assert_window_main_monitor w/2 default
++assert_window_main_monitor w/3 default
++assert_window_main_monitor w/4 default
++assert_window_monitor_workspace w/1 default 0
++
++create w/5 csd
++resize w/5 300 200
++show w/5
++wait
++assert_window_main_monitor w/5 default
++assert_window_monitor_workspace w/5 default 0
++
++window_to_monitor_workspace w/4 default 1
++move_to_monitor w/6 third
++move w/7 900 100
++stick w/8
++num_workspaces 4
++wait
++assert_monitor_workspaces default 4
++assert_monitor_workspaces third 4
++assert_window_monitor_workspace w/4 default 1
++assert_window_main_monitor w/6 third
++assert_window_main_monitor w/7 third
++
++add_monitor secondary 800 600 0x10000
++set_monitor_order default secondary third
++wait
++assert_window_main_monitor w/2 secondary
++assert_window_monitor_workspace w/2 secondary 1
++assert_position w/2 1000 100
++assert_window_main_monitor w/3 secondary
++assert_window_monitor_workspace w/3 secondary 2
++assert_monitor_workspace_active secondary 2
++assert_window_main_monitor w/4 default
++assert_window_monitor_workspace w/4 default 1
++assert_window_main_monitor w/6 third
++assert_window_main_monitor w/7 third
++assert_window_monitor_workspace w/1 default 0
++assert_window_main_monitor w/5 default
++assert_window_monitor_workspace w/5 default 0
++assert_window_main_monitor w/8 default
++assert_sticky w/8 true
++assert_monitor_workspaces secondary 4
++assert_monitor_workspaces default 4
++assert_monitor_workspaces third 4
++assert_detached_workspaces 0
+diff --git a/src/tests/test-runner.c b/src/tests/test-runner.c
+index 143b8e0..91c221c 100644
+--- a/src/tests/test-runner.c
++++ b/src/tests/test-runner.c
+@@ -2719,13 +2719,19 @@ test_case_do (TestCase    *test,
+       MetaVirtualMonitor *monitor;
+       int width, height;
+ 
+-      if (argc != 4)
+-        BAD_COMMAND ("usage: %s <monitor-id> <width> <height>", argv[0]);
++      if (argc != 4 && argc != 5)
++        BAD_COMMAND ("usage: %s <monitor-id> <width> <height> [<serial>]",
++                     argv[0]);
+ 
+       width = atoi (argv[2]);
+       height = atoi (argv[3]);
+ 
+-      monitor = meta_create_test_monitor (test->context, width, height, 60.0);
++      if (argc == 5)
++        monitor = meta_create_test_monitor_with_serial (test->context,
++                                                        width, height, 60.0,
++                                                        argv[4]);
++      else
++        monitor = meta_create_test_monitor (test->context, width, height, 60.0);
+ 
+       g_hash_table_insert (test->virtual_monitors, g_strdup (argv[1]), monitor);
+     }
+@@ -3076,6 +3082,32 @@ test_case_do (TestCase    *test,
+           return FALSE;
+         }
+     }
++  else if (strcmp (argv[0], "assert_global_active_workspace") == 0)
++    {
++      MetaDisplay *display = meta_context_get_display (test->context);
++      MetaWorkspaceManager *workspace_manager =
++        meta_display_get_workspace_manager (display);
++      MetaWorkspace *workspace;
++
++      if (argc != 3)
++        BAD_COMMAND ("usage: %s <monitor-id> <workspace-index>", argv[0]);
++
++      workspace = get_monitor_workspace (test, argv[1], argv[2], error);
++      if (!workspace)
++        return FALSE;
++
++      if (meta_workspace_manager_get_active_workspace (workspace_manager) !=
++          workspace)
++        {
++          g_set_error (error,
++                       META_TEST_CLIENT_ERROR,
++                       META_TEST_CLIENT_ERROR_ASSERTION_FAILED,
++                       "Workspace %s of monitor %s is not the global active "
++                       "workspace",
++                       argv[2], argv[1]);
++          return FALSE;
++        }
++    }
+   else if (strcmp (argv[0], "assert_window_monitor_workspace") == 0)
+     {
+       MetaTestClient *client;
