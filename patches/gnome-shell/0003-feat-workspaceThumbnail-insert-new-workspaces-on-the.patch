@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 10:46:09 +0300
+Subject: [PATCH 3/3] feat(workspaceThumbnail): insert new workspaces on the
+ monitor they are made on
+
+Dropping a window between two thumbnails and moving a window past the first workspace insert a workspace. With per-monitor workspaces that happens on the monitor of the thumbnails or of the window, and the new workspace is handed over as an object since its global index says nothing about its place on the monitor.
+---
+ js/ui/windowManager.js      | 19 +++++++++++++++----
+ js/ui/workspaceThumbnail.js | 15 ++++++++-------
+ 2 files changed, 23 insertions(+), 11 deletions(-)
+
+diff --git a/js/ui/windowManager.js b/js/ui/windowManager.js
+index b4fd82e..3437573 100644
+--- a/js/ui/windowManager.js
++++ b/js/ui/windowManager.js
+@@ -1090,11 +1090,19 @@ export class WindowManager {
+         Main.activateWindow(nextWindow);
+     }
+ 
+-    insertWorkspace(pos) {
++    insertWorkspace(pos, monitorIndex = Main.layoutManager.primaryIndex) {
+         const workspaceManager = global.workspace_manager;
+ 
+         if (!Meta.prefs_get_dynamic_workspaces())
+-            return;
++            return null;
++
++        if (workspaceManager.per_monitor_workspaces) {
++            const workspace = workspaceManager.append_new_workspace_for_monitor(
++                monitorIndex, false, global.get_current_time());
++            if (workspace)
++                workspaceManager.reorder_workspace_on_monitor(workspace, pos);
++            return workspace;
++        }
+ 
+         workspaceManager.append_new_workspace(false, global.get_current_time());
+ 
+@@ -1131,6 +1139,8 @@ export class WindowManager {
+             newWs.activate(global.get_current_time());
+             this._blockAnimations = false;
+         }
++
++        return workspaceManager.get_workspace_by_index(pos);
+     }
+ 
+     keepWorkspaceAlive(workspace, duration) {
+@@ -1951,10 +1961,11 @@ export class WindowManager {
+                 prependTarget = 'right';
+             else
+                 prependTarget = 'left';
+-            if (workspaceManager.get_active_workspace_index() === 0 &&
++            const activeWorkspace = this._getActiveWorkspaceForSwitch(currentMonitor);
++            if (workspaces.indexOf(activeWorkspace) === 0 &&
+                 action === 'move' && target === prependTarget &&
+                 this._isWorkspacePrepended === false) {
+-                this.insertWorkspace(0);
++                this.insertWorkspace(0, currentMonitor);
+                 this._isWorkspacePrepended = true;
+             }
+ 
+diff --git a/js/ui/workspaceThumbnail.js b/js/ui/workspaceThumbnail.js
+index f06c98a..451274e 100644
+--- a/js/ui/workspaceThumbnail.js
++++ b/js/ui/workspaceThumbnail.js
+@@ -930,23 +930,26 @@ export const ThumbnailsBox = GObject.registerClass({
+             [newWorkspaceIndex, this._dropPlaceholderPos] = [this._dropPlaceholderPos, -1];
+             this._spliceIndex = newWorkspaceIndex;
+ 
+-            Main.wm.insertWorkspace(newWorkspaceIndex);
++            const newWorkspace =
++                Main.wm.insertWorkspace(newWorkspaceIndex, this._monitorIndex) ??
++                global.workspace_manager.get_workspace_by_index(newWorkspaceIndex);
++            const newWorkspaceGlobalIndex = newWorkspace.get_global_index();
+ 
+             if (isWindow) {
+                 // Move the window to our monitor first if necessary.
+                 const thumbMonitor = this._thumbnails[newWorkspaceIndex].monitorIndex;
+                 Main.moveWindowToMonitorAndWorkspace(source.metaWindow,
+-                    thumbMonitor, newWorkspaceIndex, true);
++                    thumbMonitor, newWorkspaceGlobalIndex, true, newWorkspace);
+             } else if (source.app && source.app.can_open_new_window()) {
+                 if (source.animateLaunchAtPos)
+                     source.animateLaunchAtPos(actor.x, actor.y);
+ 
+-                source.app.open_new_window(newWorkspaceIndex);
++                source.app.open_new_window(newWorkspaceGlobalIndex);
+             } else if (!source.app && source.shellWorkspaceLaunch) {
+                 // While unused in our own drag sources, shellWorkspaceLaunch allows
+                 // extensions to define custom actions for their drag sources.
+                 source.shellWorkspaceLaunch({
+-                    workspace: newWorkspaceIndex,
++                    workspace: newWorkspaceGlobalIndex,
+                     timestamp: time,
+                 });
+             }
+@@ -956,9 +959,7 @@ export const ThumbnailsBox = GObject.registerClass({
+                 // to open its first window within some time, as tracked by Shell.WindowTracker.
+                 // Here, we only add a very brief timeout to avoid the _immediate_ removal of the
+                 // workspace while we wait for the startup sequence to load.
+-                const workspaceManager = global.workspace_manager;
+-                Main.wm.keepWorkspaceAlive(workspaceManager.get_workspace_by_index(newWorkspaceIndex),
+-                    WORKSPACE_KEEP_ALIVE_TIME);
++                Main.wm.keepWorkspaceAlive(newWorkspace, WORKSPACE_KEEP_ALIVE_TIME);
+             }
+ 
+             // Start the animation on the workspace (which is actually
