@@ -34,7 +34,7 @@ for patch_file in "$MIW_ROOT"/patches/extensions/*.patch; do
   fi
   case $mode in
     check)
-      if ((patched)); then echo "  $uuid: patched"; else echo "  $uuid: not patched, run scripts/patch-extensions.sh"; fi
+      if ((patched)); then echo "  $uuid: patched"; else echo "  $uuid: not patched, run ./miw update"; fi
       ;;
     apply)
       if ((patched)); then

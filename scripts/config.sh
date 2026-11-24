@@ -23,6 +23,12 @@ SESSION_FILES=(
 
 MIW_EXTRA_MUTTER_PATCHES=${MIW_EXTRA_MUTTER_PATCHES:-}
 
+ARCH_BUILD_DEPS=(
+  base-devel git glib2-devel gobject-introspection meson
+  python-docutils sysprof wayland-protocols
+  evolution-data-server gnome-keybindings sassc
+)
+
 BUILD_INFO=$MIW_PREFIX/share/mutter-independent-workspaces/build-info
 CHECK_SCRIPT=/usr/local/bin/mutter-independent-workspaces-check
 SYSTEM_FILES=(

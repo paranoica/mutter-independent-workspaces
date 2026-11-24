@@ -51,4 +51,4 @@ done
 
 systemctl --user daemon-reload || true
 
-note "installed; log out and pick \"GNOME (Independent Workspaces)\" on the login screen"
+note "session installed"

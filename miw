@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck source=scripts/config.sh
+source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts/config.sh"
+
+SCRIPTS=$MIW_ROOT/scripts
+
+usage() {
+  cat <<EOF
+Usage: ./miw <command>
+
+Commands:
+  install     check the system, install the build dependencies, then fetch,
+              build and install the session (asks for sudo)
+  update      the same as install, for after a GNOME update or a git pull
+  uninstall   remove the session and the system files, keep the build
+              (--purge also removes the build and the sources)
+  status      show what is installed and whether it still matches GNOME
+EOF
+}
+
+system_mutter() {
+  /usr/bin/mutter --version 2>/dev/null | awk 'NR == 1 { print $2 }'
+}
+
+system_shell() {
+  /usr/bin/gnome-shell --version 2>/dev/null | awk '{ print $3 }'
+}
+
+check_system() {
+  ((EUID)) || die "run ./miw as your user, it asks for sudo when it needs it"
+  command -v pacman > /dev/null || die "this needs Arch Linux (no pacman found)"
+  command -v "${SUDO_CMD[0]}" > /dev/null || die "${SUDO_CMD[0]} is not installed"
+  local mutter shell
+  mutter=$(system_mutter)
+  shell=$(system_shell)
+  [[ -n $mutter && -n $shell ]] || die "GNOME is not installed (no /usr/bin/mutter or /usr/bin/gnome-shell)"
+  if [[ $mutter != "$MUTTER_TAG" || $shell != "$SHELL_TAG" ]]; then
+    die "this checkout is for gnome-shell $SHELL_TAG and mutter $MUTTER_TAG," \
+      "the system has gnome-shell $shell and mutter $mutter." \
+      "Run git pull; if the versions still differ, this GNOME release is not supported yet."
+  fi
+}
+
+install_deps() {
+  local missing
+  missing=$(pacman -T "${ARCH_BUILD_DEPS[@]}" || true)
+  if [[ -z $missing ]]; then
+    note "build dependencies are installed"
+    return
+  fi
+  note "updating the system and installing the build dependencies (sudo)"
+  # shellcheck disable=SC2086
+  "${SUDO_CMD[@]}" pacman -Syu --needed $missing
+  check_system
+}
+
+prefix_root() {
+  [[ $MIW_PREFIX =~ ^/[A-Za-z0-9._/+-]+/usr$ ]] ||
+    die "MIW_PREFIX must be an absolute path of letters, digits and ._/+- ending in /usr"
+  local root=${MIW_PREFIX%/usr}
+  [[ $MIW_ROOT/ != "$root"/* ]] || die "the checkout must not be inside $root"
+  echo "$root"
+}
+
+prepare_prefix() {
+  local root
+  root=$(prefix_root)
+  if [[ ! -d $root ]]; then
+    note "creating $root (sudo)"
+    "${SUDO_CMD[@]}" install -d -o "$USER" -g "$(id -gn)" "$root"
+  fi
+  [[ -w $root ]] || die "$root is not writable, run: sudo chown -R $USER $root"
+  if [[ ! -e $root/.miw-prefix ]]; then
+    [[ -z $(ls -A "$root") || -e $BUILD_INFO || -e $MIW_PREFIX/bin/gnome-shell-iw ]] ||
+      die "$root already has other files in it, pick another MIW_PREFIX"
+    touch "$root/.miw-prefix"
+  fi
+}
+
+cmd_install() {
+  check_system
+  install_deps
+  prepare_prefix
+  "$SCRIPTS/fetch.sh"
+  "$SCRIPTS/build.sh"
+  "$SCRIPTS/install.sh"
+  "$SCRIPTS/patch-extensions.sh"
+  note "done; log out and pick \"GNOME (Independent Workspaces)\" on the login screen"
+}
+
+cmd_uninstall() {
+  local purge=0
+  case ${1:-} in
+    '') ;;
+    --purge) purge=1 ;;
+    *) die "unknown option $1" ;;
+  esac
+  ((EUID)) || die "run ./miw as your user, it asks for sudo when it needs it"
+  "$SCRIPTS/uninstall.sh"
+  if ((purge)); then
+    local root dir
+    root=$(prefix_root)
+    if [[ -d $root ]]; then
+      [[ -e $root/.miw-prefix ]] || die "$root was not created by ./miw, remove it by hand"
+      note "removing $root (sudo)"
+      "${SUDO_CMD[@]}" rm -rf -- "$root"
+    fi
+    for dir in "$MIW_WORK/src" "$MIW_WORK/build" "$MIW_WORK/devkit"; do
+      if [[ -d $dir ]]; then
+        note "removing $dir"
+        rm -rf -- "$dir"
+      fi
+    done
+    rmdir --ignore-fail-on-non-empty -- "$MIW_WORK" 2> /dev/null || true
+  else
+    note "the build is still in ${MIW_PREFIX%/usr}; ./miw uninstall --purge removes it"
+  fi
+}
+
+state() {
+  if [[ -e $1 ]]; then echo "installed"; else echo "missing"; fi
+}
+
+cmd_status() {
+  local built_mutter='' built_shell=''
+  if [[ -r $BUILD_INFO ]]; then
+    built_mutter=$(sed -n 's/^MUTTER_VERSION=//p' "$BUILD_INFO")
+    built_shell=$(sed -n 's/^SHELL_VERSION=//p' "$BUILD_INFO")
+  fi
+  printf '%-22s gnome-shell %s, mutter %s\n' "system GNOME" "$(system_shell)" "$(system_mutter)"
+  printf '%-22s %s\n' "this checkout" "gnome-shell $SHELL_TAG, mutter $MUTTER_TAG"
+  if [[ -n $built_mutter ]]; then
+    printf '%-22s %s\n' "installed build" "gnome-shell $built_shell, mutter $built_mutter"
+  else
+    printf '%-22s %s\n' "installed build" "none"
+  fi
+  printf '%-22s %s\n' "login session" "$(state "${SESSION_FILES[0]#*:}")"
+  printf '%-22s %s\n' "pacman hook" "$(state "${SYSTEM_FILES[0]#*:}")"
+  echo "extensions:"
+  "$SCRIPTS/patch-extensions.sh" --check
+  if [[ -n $built_mutter && ($built_mutter != "$(system_mutter)" || $built_shell != "$(system_shell)") ]]; then
+    echo
+    echo "The build does not match GNOME any more; the session will not start. Run: ./miw update"
+  fi
+}
+
+case ${1:-} in
+  install | update) cmd_install ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  status) cmd_status ;;
+  -h | --help | help | '') usage ;;
+  *) usage >&2; exit 1 ;;
+esac
