@@ -16,6 +16,9 @@ for entry in "${SESSION_FILES[@]}"; do
 done
 systemctl --user daemon-reload || true
 
+note "extension patches"
+"$MIW_ROOT/scripts/patch-extensions.sh" --revert
+
 note "files in $MIW_PREFIX"
 if [[ -e $MIW_PREFIX/bin/gnome-shell-iw ]]; then
   rm -f -- "$MIW_PREFIX/bin/gnome-shell-iw"

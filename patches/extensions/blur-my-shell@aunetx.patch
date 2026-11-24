@@ -1,0 +1,38 @@
+--- a/components/overview.js
++++ b/components/overview.js
+@@ -92,7 +92,9 @@
+                 && overview_blur.active_patch_generation === generation
+                 && !had_switch
+             )
+-                overview_blur.prepare_workspace_switch();
++                overview_blur.prepare_workspace_switch(
++                    this._switchData?.monitors?.map(group => group.index)
++                );
+             return result;
+         };
+         this._patched_FinishSwitch = function (...params) {
+@@ -156,7 +158,7 @@
+         );
+     }
+ 
+-    prepare_workspace_switch() {
++    prepare_workspace_switch(switching_monitors) {
+         this._log("prepare workspace switch");
+         this.finish_workspace_switch();
+ 
+@@ -167,9 +169,12 @@
+ 
+         const primary_index = Main.layoutManager.primaryMonitor?.index;
+         this.animation_background_managers.forEach(bg_manager => {
+-            bg_manager._bms_pipeline.actor.visible = !Meta.prefs_get_workspaces_only_on_primary()
+-                || primary_index === undefined
+-                || bg_manager._monitorIndex === primary_index;
++            const on_primary_only = Meta.prefs_get_workspaces_only_on_primary()
++                && primary_index !== undefined
++                && bg_manager._monitorIndex !== primary_index;
++            const not_switching = switching_monitors !== undefined
++                && !switching_monitors.includes(bg_manager._monitorIndex);
++            bg_manager._bms_pipeline.actor.visible = !on_primary_only && !not_switching;
+         });
+     }
+ 
