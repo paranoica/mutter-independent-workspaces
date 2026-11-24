@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 10:30:00 +0300
+Subject: [PATCH] feat(workspace): bring back meta_workspace_index() for
+ extensions
+
+Extensions such as dash-to-dock still call Workspace.index() and throw on every event without it. It returns the global index, which is what the rest of the index based API takes.
+---
+ src/core/workspace.c | 6 ++++++
+ src/meta/workspace.h | 3 +++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/src/core/workspace.c b/src/core/workspace.c
+index a9e5fa6..86b2226 100644
+--- a/src/core/workspace.c
++++ b/src/core/workspace.c
+@@ -950,6 +950,12 @@ meta_workspace_get_global_index (MetaWorkspace *workspace)
+   return g_list_index (workspace->manager->workspaces, workspace);
+ }
+ 
++int
++meta_workspace_index (MetaWorkspace *workspace)
++{
++  return meta_workspace_get_global_index (workspace);
++}
++
+ /**
+  * meta_workspace_get_index_on_monitor:
+  * @workspace: a #MetaWorkspace
+diff --git a/src/meta/workspace.h b/src/meta/workspace.h
+index b1cc75f..196333e 100644
+--- a/src/meta/workspace.h
++++ b/src/meta/workspace.h
+@@ -35,6 +35,9 @@ typedef struct _MetaWorkspaceClass   MetaWorkspaceClass;
+ META_EXPORT
+ GType meta_workspace_get_type (void);
+ 
++META_EXPORT
++int  meta_workspace_index (MetaWorkspace *workspace);
++
+ META_EXPORT
+ int  meta_workspace_get_global_index (MetaWorkspace *workspace);
+ 
