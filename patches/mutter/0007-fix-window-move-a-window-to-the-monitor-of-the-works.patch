@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 10:40:22 +0300
+Subject: [PATCH] fix(window): move a window to the monitor of the workspace it
+ is put on
+
+A window put on a workspace of another monitor stayed where it was and showed up whenever that workspace was active, on top of whatever the monitor it sat on was showing.
+---
+ src/core/window.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/core/window.c b/src/core/window.c
+index ea12f40..8ab681a 100644
+--- a/src/core/window.c
++++ b/src/core/window.c
+@@ -5473,6 +5473,12 @@ meta_window_change_workspace (MetaWindow    *window,
+                                  workspace);
+   meta_window_foreach_ancestor (window, change_workspace_foreach,
+                                 workspace);
++
++  if (window->display->workspace_manager->per_monitor_workspaces &&
++      workspace->monitor && window->monitor &&
++      window->monitor != workspace->monitor)
++    meta_window_move_to_monitor (window,
++                                 meta_logical_monitor_get_number (workspace->monitor));
+ }
+ 
+ static void
