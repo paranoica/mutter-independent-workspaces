@@ -1,5 +1,5 @@
 diff --git a/appIcons.js b/appIcons.js
-index 5b26094..f934a38 100644
+index 5b26094..5c9ad0c 100644
 --- a/appIcons.js
 +++ b/appIcons.js
 @@ -852,10 +852,9 @@ export const DockAbstractAppIcon = GObject.registerClass({
@@ -14,6 +14,21 @@ index 5b26094..f934a38 100644
                  w.minimize();
                  // Just minimize one window. By specification it should be the
                  // focused window on the current workspace.
+@@ -879,13 +878,12 @@ export const DockAbstractAppIcon = GObject.registerClass({
+ 
+         // then activate all other app windows in the current workspace
+         const windows = this.getInterestingWindows();
+-        const activeWorkspace = global.workspace_manager.get_active_workspace_index();
+ 
+         if (windows.length <= 0)
+             return;
+ 
+         for (let i = windows.length - 1; i >= 0; i--) {
+-            if (windows[i].get_workspace()?.index() === activeWorkspace)
++            if (windows[i].get_workspace()?.active)
+                 Main.activateWindow(windows[i]);
+         }
+     }
 diff --git a/intellihide.js b/intellihide.js
 index 3d198bc..61e0d5a 100644
 --- a/intellihide.js
