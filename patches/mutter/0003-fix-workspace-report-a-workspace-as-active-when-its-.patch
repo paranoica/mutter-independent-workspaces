@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: paranoica <mitjumper@gmail.com>
+Date: Tue, 24 Nov 2026 10:30:00 +0300
+Subject: [PATCH] fix(workspace): report a workspace as active when its monitor
+ shows it
+
+The active property followed the global active workspace only, so the overview disabled the close button and title of windows on every other monitor.
+---
+ src/core/workspace.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/workspace.c b/src/core/workspace.c
+index 60b722e..a9e5fa6 100644
+--- a/src/core/workspace.c
++++ b/src/core/workspace.c
+@@ -160,7 +160,10 @@ meta_workspace_get_property (GObject      *object,
+       g_value_set_uint (value, meta_workspace_get_global_index (ws));
+       break;
+     case PROP_ACTIVE:
+-      g_value_set_boolean (value, ws->manager->active_workspace == ws);
++      if (ws->container)
++        g_value_set_boolean (value, ws->container->active_workspace == ws);
++      else
++        g_value_set_boolean (value, ws->manager->active_workspace == ws);
+       break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
